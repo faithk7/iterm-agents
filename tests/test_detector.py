@@ -24,6 +24,7 @@ from iterm_agents.detector import (
     _is_codex_process,
     detect_agents,
     get_git_info,
+    screen_shows_active_turn,
 )
 
 
@@ -484,6 +485,43 @@ class TestDetectAgents:
             ]
         )
         assert _detect_claude_state(table, 20) == AgentState.RUNNING
+
+
+class TestScreenShowsActiveTurn:
+    def test_cursor_running_footer(self) -> None:
+        screen = "\n".join(
+            [
+                "  some command output",
+                "  ⠠⠜ Running  8.98k tokens",
+                "  → Add a follow-up                                       ctrl+c to stop",
+                "  Grok 4.7 256K High                                      Run Everything",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.CURSOR, screen)
+
+    def test_cursor_idle_follow_up_is_not_running(self) -> None:
+        screen = "\n".join(
+            [
+                "  → Add a follow-up",
+                "  Grok 4.7 256K High · 35.1%                              Run Everything",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.CURSOR, screen)
+
+    def test_running_mention_above_the_footer_is_ignored(self) -> None:
+        older = [f"  Running {index} tokens in the transcript" for index in range(20)]
+        screen = "\n".join(
+            [
+                *older,
+                "  → Add a follow-up",
+                "  Grok 4.7 256K High                                      Run Everything",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.CURSOR, screen)
+
+    def test_other_agents_ignore_the_cursor_footer(self) -> None:
+        screen = "  ⠠⠜ Running  8.98k tokens\n  ctrl+c to stop"
+        assert not screen_shows_active_turn(AgentType.KIMI, screen)
 
 
 class TestGetGitInfo:

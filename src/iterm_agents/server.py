@@ -15,7 +15,14 @@ import iterm2.session
 import iterm2.tool
 from aiohttp import web
 
-from iterm_agents.detector import AgentInfo, detect_agents, get_git_info
+from iterm_agents.detector import (
+    AgentInfo,
+    AgentState,
+    AgentType,
+    detect_agents,
+    get_git_info,
+    screen_shows_active_turn,
+)
 from iterm_agents.session_state import SessionStateTracker
 from iterm_agents.ui import AGENT_MONITOR_HTML
 
@@ -199,6 +206,13 @@ class AgentMonitorServer:
             git = get_git_info(path) if path else None
             agent: AgentInfo | None = agent_by_session_pid.get(pid)
             home = os.path.expanduser("~")
+            agent_state = agent.state.value if agent else ""
+            if (
+                agent is not None
+                and agent.state is AgentState.IDLE
+                and agent.agent_type is AgentType.CURSOR
+            ):
+                agent_state = await _cursor_state_from_screen(session, agent_state)
 
             sessions_info.append(
                 {
@@ -209,7 +223,7 @@ class AgentMonitorServer:
                     "branch": git.branch if git else "",
                     "root_repo": git.root_repo.replace(home, "~") if git else "",
                     "agent_type": agent.agent_type.value if agent else "",
-                    "agent_state": agent.state.value if agent else "",
+                    "agent_state": agent_state,
                     "pid": pid,
                 }
             )
@@ -245,3 +259,15 @@ class AgentMonitorServer:
                         return web.Response(text="ok")
 
         return web.Response(text="not found", status=404)
+
+
+async def _cursor_state_from_screen(session: iterm2.session.Session, agent_state: str) -> str:
+    """Upgrade an idle Cursor session when its footer shows an active turn."""
+    try:
+        screen = await session.async_get_screen_contents()
+        text = "\n".join(screen.line(index).string for index in range(screen.number_of_lines))
+    except Exception:
+        return agent_state
+    if screen_shows_active_turn(AgentType.CURSOR, text):
+        return AgentState.RUNNING.value
+    return agent_state

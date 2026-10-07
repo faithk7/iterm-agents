@@ -243,6 +243,37 @@ def _detect_codex_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
     return AgentState.IDLE
 
 
+def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
+    """True when the visible terminal footer says a turn is in progress.
+
+    Cursor Agent keeps the Node process alive at the prompt, so a missing
+    sandbox child does not mean the turn is finished. While it is generating,
+    the footer contains ``Running … tokens`` and ``ctrl+c to stop``. An idle
+    prompt is only ``Add a follow-up``.
+    """
+    if agent_type is not AgentType.CURSOR:
+        return False
+    tail = [line.strip() for line in screen_text.splitlines() if line.strip()][-12:]
+    if any("ctrl+c to stop" in line for line in tail):
+        return True
+    return any(_is_cursor_running_status(line) for line in tail)
+
+
+def _is_cursor_running_status(line: str) -> bool:
+    """Match the footer ``Running  8.98k tokens``, not a transcript sentence."""
+    marker = "Running"
+    index = line.find(marker)
+    if index < 0:
+        return False
+    parts = line[index + len(marker) :].split()
+    if len(parts) != 2 or parts[1] != "tokens":
+        return False
+    count = parts[0][:-1] if parts[0].endswith(("k", "K")) else parts[0]
+    if count.count(".") > 1:
+        return False
+    return count.replace(".", "", 1).isdigit()
+
+
 def _detect_busy_child_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
     """Cursor Agent, Devin, and Kimi Code have no published turn signal.
 
