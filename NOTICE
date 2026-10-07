@@ -1,0 +1,13 @@
+iterm-agents is derived from it2ag.
+
+Upstream: https://github.com/mkusaka/it2ag
+Author: mkusaka
+License: GNU General Public License, version 2
+
+The process scan, iTerm2 toolbelt panel, session list, git and worktree
+grouping, click-to-focus, and the Claude Code and Codex activity signals
+come from that project.
+
+This repository is separate. It adds recognition for the Cursor Agent CLI,
+the Devin CLI, and Kimi Code, and it registers its own toolbelt panel
+(`dev.iterm-agents.monitor`) so it can run beside it2ag.
