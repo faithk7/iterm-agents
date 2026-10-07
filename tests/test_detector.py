@@ -22,6 +22,8 @@ from iterm_agents.detector import (
     _is_agent_process,
     _is_claude_process,
     _is_codex_process,
+    cursor_activity_signature,
+    cursor_turn_is_live,
     detect_agents,
     get_git_info,
     screen_shows_active_turn,
@@ -522,6 +524,46 @@ class TestScreenShowsActiveTurn:
     def test_other_agents_ignore_the_cursor_footer(self) -> None:
         screen = "  ⠠⠜ Running  8.98k tokens\n  ctrl+c to stop"
         assert not screen_shows_active_turn(AgentType.KIMI, screen)
+
+    def test_leftover_running_line_above_an_idle_composer_is_ignored(self) -> None:
+        screen = "\n".join(
+            [
+                "  ⠰⠳ Running  2.79k tokens",
+                "  ▄▄▄▄▄▄▄▄",
+                "  → Add a follow-up",
+                "  ▀▀▀▀▀▀▀▀",
+                "  Grok 4.7 256K High · 88.5% · 14 files edited            Run Everything",
+                "  ~",
+            ]
+        )
+        assert cursor_activity_signature(screen) is None
+        assert not screen_shows_active_turn(AgentType.CURSOR, screen)
+
+    def test_signature_ignores_the_spinner_and_tracks_a_tool_timer(self) -> None:
+        first = "\n".join(
+            [
+                "    import asyncio 2.6s in code/iterm-agents",
+                "  ⠰⠳ Running  2.79k tokens",
+                "  ▄▄▄▄▄▄▄▄",
+                "  → Add a follow-up                                       ctrl+c to stop",
+                "  ▀▀▀▀▀▀▀▀",
+                "  3 tasks",
+                "  ~",
+            ]
+        )
+        spun = first.replace("⠰⠳", "⠠⠜")
+        later = first.replace("2.6s", "7.6s")
+        signature = cursor_activity_signature(first)
+        assert signature is not None
+        assert cursor_activity_signature(spun) == signature
+        assert cursor_activity_signature(later) != signature
+
+    def test_frozen_footer_is_not_a_live_turn(self) -> None:
+        signature = "Running 2.79k tokens"
+        assert cursor_turn_is_live(signature, None, 0)
+        assert cursor_turn_is_live(signature, signature, 29)
+        assert not cursor_turn_is_live(signature, signature, 30)
+        assert cursor_turn_is_live("Running 2.80k tokens", signature, 40)
 
 
 class TestGetGitInfo:

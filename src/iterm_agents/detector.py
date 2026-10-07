@@ -243,35 +243,72 @@ def _detect_codex_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
     return AgentState.IDLE
 
 
-def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
-    """True when the visible terminal footer says a turn is in progress.
+# A frozen "Running N tokens" footer is a finished turn whose status line
+# never cleared. Real generation changes this signature every few seconds.
+CURSOR_FOOTER_STALE_SECONDS = 30.0
 
-    Cursor Agent keeps the Node process alive at the prompt, so a missing
-    sandbox child does not mean the turn is finished. While it is generating,
-    the footer contains ``Running … tokens`` and ``ctrl+c to stop``. An idle
-    prompt is only ``Add a follow-up``.
-    """
+
+def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
+    """True when the current Cursor footer, not older transcript text, is active."""
     if agent_type is not AgentType.CURSOR:
         return False
-    tail = [line.strip() for line in screen_text.splitlines() if line.strip()][-12:]
-    if any("ctrl+c to stop" in line for line in tail):
+    return cursor_activity_signature(screen_text) is not None
+
+
+def cursor_activity_signature(screen_text: str) -> str | None:
+    """Stable id of an in-progress Cursor turn, or None when the footer is idle.
+
+    The live signal is ``ctrl+c to stop`` inside the composer box. A
+    ``Running N tokens`` line left above that box after the turn ends does
+    not count. The signature is the visible screen with the braille spinner
+    removed, so a timer or a new token count changes it and a stuck footer
+    does not.
+    """
+    footer = _cursor_footer_lines(screen_text)
+    if not any("ctrl+c to stop" in line for line in footer):
+        return None
+    return _normalize_cursor_screen(screen_text)
+
+
+def _normalize_cursor_screen(screen_text: str) -> str:
+    """Drop the animated spinner and insignificant spacing."""
+    kept = []
+    for char in screen_text:
+        if "\u2800" <= char <= "\u28ff":
+            continue
+        kept.append(char)
+    lines = (" ".join(line.split()) for line in "".join(kept).splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def cursor_turn_is_live(
+    signature: str | None,
+    previous: str | None,
+    age_seconds: float,
+    *,
+    stale_after: float = CURSOR_FOOTER_STALE_SECONDS,
+) -> bool:
+    """A footer that still says stop, but has not changed, is a finished turn."""
+    if signature is None:
+        return False
+    if previous != signature:
         return True
-    return any(_is_cursor_running_status(line) for line in tail)
+    return age_seconds < stale_after
 
 
-def _is_cursor_running_status(line: str) -> bool:
-    """Match the footer ``Running  8.98k tokens``, not a transcript sentence."""
-    marker = "Running"
-    index = line.find(marker)
-    if index < 0:
-        return False
-    parts = line[index + len(marker) :].split()
-    if len(parts) != 2 or parts[1] != "tokens":
-        return False
-    count = parts[0][:-1] if parts[0].endswith(("k", "K")) else parts[0]
-    if count.count(".") > 1:
-        return False
-    return count.replace(".", "", 1).isdigit()
+def _cursor_footer_lines(screen_text: str) -> list[str]:
+    """The composer box and the status line directly above it."""
+    lines = [line.rstrip() for line in screen_text.splitlines()]
+    box = next((index for index, line in enumerate(lines) if "▄▄▄" in line), None)
+    if box is None:
+        return [line.strip() for line in lines if line.strip()][-8:]
+    start = box
+    previous = box - 1
+    while previous >= 0 and not lines[previous].strip():
+        previous -= 1
+    if previous >= 0:
+        start = previous
+    return [line.strip() for line in lines[start:] if line.strip()]
 
 
 def _detect_busy_child_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:

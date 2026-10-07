@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import weakref
 
 import iterm2
@@ -19,9 +20,10 @@ from iterm_agents.detector import (
     AgentInfo,
     AgentState,
     AgentType,
+    cursor_activity_signature,
+    cursor_turn_is_live,
     detect_agents,
     get_git_info,
-    screen_shows_active_turn,
 )
 from iterm_agents.session_state import SessionStateTracker
 from iterm_agents.ui import AGENT_MONITOR_HTML
@@ -59,6 +61,7 @@ class AgentMonitorServer:
         self.port = port
         self._sse_clients: weakref.WeakSet[web.StreamResponse] = weakref.WeakSet()
         self._session_state = SessionStateTracker()
+        self._cursor_footer: dict[str, tuple[str, float]] = {}
 
     @property
     def url(self) -> str:
@@ -212,7 +215,7 @@ class AgentMonitorServer:
                 and agent.state is AgentState.IDLE
                 and agent.agent_type is AgentType.CURSOR
             ):
-                agent_state = await _cursor_state_from_screen(session, agent_state)
+                agent_state = await self._cursor_state_from_screen(session, agent_state)
 
             sessions_info.append(
                 {
@@ -260,14 +263,29 @@ class AgentMonitorServer:
 
         return web.Response(text="not found", status=404)
 
-
-async def _cursor_state_from_screen(session: iterm2.session.Session, agent_state: str) -> str:
-    """Upgrade an idle Cursor session when its footer shows an active turn."""
-    try:
-        screen = await session.async_get_screen_contents()
-        text = "\n".join(screen.line(index).string for index in range(screen.number_of_lines))
-    except Exception:
+    async def _cursor_state_from_screen(
+        self, session: iterm2.session.Session, agent_state: str
+    ) -> str:
+        """Upgrade an idle Cursor session only while its footer is still moving."""
+        try:
+            screen = await session.async_get_screen_contents()
+            text = "\n".join(screen.line(index).string for index in range(screen.number_of_lines))
+        except Exception:
+            return agent_state
+        signature = cursor_activity_signature(text)
+        session_id = session.session_id
+        now = time.monotonic()
+        if signature is None:
+            self._cursor_footer.pop(session_id, None)
+            return agent_state
+        previous = self._cursor_footer.get(session_id)
+        if previous is None or previous[0] != signature:
+            self._cursor_footer[session_id] = (signature, now)
+            previous_signature = None
+            age = 0.0
+        else:
+            previous_signature = previous[0]
+            age = now - previous[1]
+        if cursor_turn_is_live(signature, previous_signature, age):
+            return AgentState.RUNNING.value
         return agent_state
-    if screen_shows_active_turn(AgentType.CURSOR, text):
-        return AgentState.RUNNING.value
-    return agent_state

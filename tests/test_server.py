@@ -5,6 +5,44 @@ import pytest
 from iterm_agents.server import DEFAULT_HOST, AgentMonitorServer, _resolve_bound_port
 
 
+class _Line:
+    def __init__(self, text: str) -> None:
+        self.string = text
+
+
+class _Screen:
+    def __init__(self, text: str) -> None:
+        self._lines = text.splitlines() or [""]
+
+    @property
+    def number_of_lines(self) -> int:
+        return len(self._lines)
+
+    def line(self, index: int) -> _Line:
+        return _Line(self._lines[index])
+
+
+class _Session:
+    def __init__(self, text: str) -> None:
+        self.session_id = "session-1"
+        self._text = text
+
+    async def async_get_screen_contents(self) -> _Screen:
+        return _Screen(self._text)
+
+
+_FROZEN_FOOTER = "\n".join(
+    [
+        "  ⠰⠳ Running  2.79k tokens",
+        "  ▄▄▄▄▄▄▄▄",
+        "  → Add a follow-up                                       ctrl+c to stop",
+        "  ▀▀▀▀▀▀▀▀",
+        "  3 tasks",
+        "  ~",
+    ]
+)
+
+
 class TestResolveBoundPort:
     def test_resolves_ipv4_port(self) -> None:
         assert _resolve_bound_port([("127.0.0.1", 50123)]) == 50123
@@ -28,3 +66,15 @@ class TestAgentMonitorServer:
 
         assert server.host == DEFAULT_HOST
         assert server.url == "http://127.0.0.1:50123/"
+
+    async def test_frozen_footer_returns_to_idle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        clock = {"now": 0.0}
+        monkeypatch.setattr("iterm_agents.server.time.monotonic", lambda: clock["now"])
+        session = _Session(_FROZEN_FOOTER)
+
+        assert await server._cursor_state_from_screen(session, "idle") == "running"
+        clock["now"] = 10.0
+        assert await server._cursor_state_from_screen(session, "idle") == "running"
+        clock["now"] = 31.0
+        assert await server._cursor_state_from_screen(session, "idle") == "idle"
