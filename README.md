@@ -12,7 +12,7 @@ This is a separate project derived from [it2ag](https://github.com/mkusaka/it2ag
 | Codex | executable name `codex` | a sandbox child, or the IOKit assertion `Codex is running an active turn` |
 | Cursor Agent | `cursor-agent`, or `node` / `agent` whose command line contains both `/cursor-agent/` and `index.js` | a `caffeinate`, `sandbox-exec`, or `bwrap` child |
 | Devin CLI | executable name `devin` | the same busy-child rule |
-| Kimi Code | executable name `kimi` | the same busy-child rule |
+| Kimi Code | executable name `kimi` or `kimi-code` | the same busy-child rule |
 
 The Cursor editor (`Cursor.app`), the Kimi desktop app, and `kimi-cu` are not treated as these CLIs.
 

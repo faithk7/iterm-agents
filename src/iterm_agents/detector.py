@@ -165,7 +165,9 @@ def _classify(command: str) -> AgentType | None:
         return AgentType.CODEX
     if name == "devin":
         return AgentType.DEVIN
-    if name == "kimi":
+    # The Kimi Code CLI sets its process name to `kimi-code`. The desktop app
+    # is `Kimi` and the computer-use helper is `kimi-cu`; neither is this CLI.
+    if name in {"kimi", "kimi-code"}:
         return AgentType.KIMI
     if _is_cursor_agent(command):
         return AgentType.CURSOR

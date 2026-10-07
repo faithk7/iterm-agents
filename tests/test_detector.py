@@ -438,6 +438,23 @@ class TestDetectAgents:
 
     @patch("iterm_agents.detector._get_codex_active_pids", return_value=set())
     @patch("iterm_agents.detector._build_process_table")
+    def test_kimi_code_process_name(self, mock_table: object, mock_pids: object) -> None:
+        mock_table.return_value = _make_table(  # type: ignore[union-attr]
+            [
+                (1, 0, "init"),
+                (10, 1, "-zsh"),
+                (20, 10, "kimi-code"),
+                (30, 20, "/Applications/KimiCU.app/Contents/MacOS/kimi-cu mcp -s user"),
+            ]
+        )
+        agents = detect_agents()
+        assert len(agents) == 1
+        assert agents[0].pid == 20
+        assert agents[0].agent_type == AgentType.KIMI
+        assert agents[0].session_pid is None
+
+    @patch("iterm_agents.detector._get_codex_active_pids", return_value=set())
+    @patch("iterm_agents.detector._build_process_table")
     def test_cursor_wrapper_argv_counts_once(self, mock_table: object, mock_pids: object) -> None:
         parent = (
             "/Users/kaiqu/.local/bin/agent --use-system-ca "
