@@ -188,7 +188,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       for (const el of items) el.classList.remove('focused');
     }
 
+    let loadingSessions = false;
+
     async function loadSessions() {
+      if (loadingSessions) return;
+      loadingSessions = true;
       try {
         const res = await fetch('/api/sessions');
         allSessions = await res.json();
@@ -196,6 +200,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       } catch(e) {
         document.getElementById('sessions').innerHTML =
           '<div class="no-results">Failed to load sessions</div>';
+      } finally {
+        loadingSessions = false;
       }
     }
 
@@ -331,7 +337,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }
 
     loadSessions();
-    setInterval(loadSessions, 3000);
+    setInterval(loadSessions, 1000);
 
     // SSE: listen for focus events from the Python side (Cmd+Shift+M)
     function connectSSE() {
