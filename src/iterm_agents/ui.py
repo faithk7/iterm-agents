@@ -126,15 +126,17 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // Use multiple strategies since embedded WebViews may not fire focus events.
     let hadFocus = document.hasFocus();
     window.addEventListener('focus', () => {
-      document.getElementById('search').focus();
+      document.getElementById('search').focus({ preventScroll: true });
     });
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) document.getElementById('search').focus();
+      if (!document.hidden) {
+        document.getElementById('search').focus({ preventScroll: true });
+      }
     });
     setInterval(() => {
       const hasFocus = document.hasFocus();
       if (hasFocus && !hadFocus) {
-        document.getElementById('search').focus();
+        document.getElementById('search').focus({ preventScroll: true });
       }
       hadFocus = hasFocus;
     }, 200);
@@ -187,6 +189,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     function clearFocus(items) {
       for (const el of items) el.classList.remove('focused');
     }
+
+    // A refresh rewriting the row mid-press eats the click, so defer DOM
+    // writes until the button is released.
+    let pointerDown = false;
+    document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+    document.addEventListener('pointerup', () => { pointerDown = false; }, true);
+    document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
 
     let loadingSessions = false;
 
@@ -253,7 +262,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         html += renderGroup('(no repo)', '', noRepo);
       }
 
-      container.innerHTML = html;
+      if (!pointerDown) {
+        container.innerHTML = html;
+      }
 
       const running = sessions.filter(s => s.agent_state === 'running').length;
       const awaiting = sessions.filter(s => s.agent_state === 'awaiting_user').length;
