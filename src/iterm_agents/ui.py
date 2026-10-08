@@ -199,7 +199,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         filterSessions();
       } catch(e) {
         document.getElementById('sessions').innerHTML =
-          '<div class="no-results">Failed to load sessions</div>';
+          '<div class="no-results">Failed to load sessions<br>' + esc(String(e)) + '</div>';
       } finally {
         loadingSessions = false;
       }
