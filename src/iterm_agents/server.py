@@ -24,6 +24,7 @@ from iterm_agents.detector import (
     cursor_turn_is_live,
     detect_agents,
     get_git_info,
+    screen_shows_active_turn,
 )
 from iterm_agents.session_state import SessionStateTracker
 from iterm_agents.ui import AGENT_MONITOR_HTML
@@ -210,12 +211,11 @@ class AgentMonitorServer:
             agent: AgentInfo | None = agent_by_session_pid.get(pid)
             home = os.path.expanduser("~")
             agent_state = agent.state.value if agent else ""
-            if (
-                agent is not None
-                and agent.state is AgentState.IDLE
-                and agent.agent_type is AgentType.CURSOR
-            ):
-                agent_state = await self._cursor_state_from_screen(session, agent_state)
+            if agent is not None and agent.state is AgentState.IDLE:
+                if agent.agent_type is AgentType.CURSOR:
+                    agent_state = await self._cursor_state_from_screen(session, agent_state)
+                elif agent.agent_type is AgentType.DEVIN:
+                    agent_state = await self._devin_state_from_screen(session, agent_state)
 
             sessions_info.append(
                 {
@@ -263,14 +263,30 @@ class AgentMonitorServer:
 
         return web.Response(text="not found", status=404)
 
+    async def _screen_text(self, session: iterm2.session.Session) -> str | None:
+        try:
+            screen = await session.async_get_screen_contents()
+            return "\n".join(
+                screen.line(index).string for index in range(screen.number_of_lines)
+            )
+        except Exception:
+            return None
+
+    async def _devin_state_from_screen(
+        self, session: iterm2.session.Session, agent_state: str
+    ) -> str:
+        """Upgrade an idle Devin session while its interrupt hint is on screen."""
+        text = await self._screen_text(session)
+        if text is not None and screen_shows_active_turn(AgentType.DEVIN, text):
+            return AgentState.RUNNING.value
+        return agent_state
+
     async def _cursor_state_from_screen(
         self, session: iterm2.session.Session, agent_state: str
     ) -> str:
         """Upgrade an idle Cursor session only while its footer is still moving."""
-        try:
-            screen = await session.async_get_screen_contents()
-            text = "\n".join(screen.line(index).string for index in range(screen.number_of_lines))
-        except Exception:
+        text = await self._screen_text(session)
+        if text is None:
             return agent_state
         signature = cursor_activity_signature(text)
         session_id = session.session_id

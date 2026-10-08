@@ -566,6 +566,81 @@ class TestScreenShowsActiveTurn:
         assert cursor_turn_is_live("Running 2.80k tokens", signature, 40)
 
 
+class TestDevinScreenShowsActiveTurn:
+    def test_running_status_line_above_the_input_box(self) -> None:
+        screen = "\n".join(
+            [
+                "  │ some tool output",
+                "  ⠀⠸ Running tools · 2m 28s (esc twice to interrupt)",
+                "  ─────────────────────────── (bypass permissions on) ─",
+                "  ❭ Guide Devin while it works",
+                "  ───────────────────────────────────────────────",
+                "  SWE-2 Max                       Context: 89k / 262k tokens (34%)",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.DEVIN, screen)
+
+    def test_esc_again_variant_is_running(self) -> None:
+        screen = "\n".join(
+            [
+                "  ⠀⠸ Thinking · 12s (esc again to interrupt)",
+                "  ─────────────────────────── (bypass permissions on) ─",
+                "  ❭ Guide Devin while it works",
+                "  ───────────────────────────────────────────────",
+                "  SWE-2 Max                       Context: 89k / 262k tokens (34%)",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.DEVIN, screen)
+
+    def test_idle_composer_is_not_running(self) -> None:
+        screen = "\n".join(
+            [
+                "  Report updated.",
+                "  ─────────────────────────── (bypass permissions on) ─",
+                "  ❭ Ask Devin to build features, fix bugs, or work on your code",
+                "  ───────────────────────────────────────────────",
+                "  SWE-2 High                      Context: 98k / 262k tokens (37%)",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.DEVIN, screen)
+
+    def test_transcript_echo_without_box_border_is_ignored(self) -> None:
+        screen = "\n".join(
+            [
+                '  │ print("(esc twice to interrupt)")',
+                "  │ Exited with code 0",
+                "  ─────────────────────────── (bypass permissions on) ─",
+                "  ❭ Ask Devin to build features, fix bugs, or work on your code",
+                "  ───────────────────────────────────────────────",
+                "  SWE-2 Max                       Context: 89k / 262k tokens (34%)",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.DEVIN, screen)
+
+    def test_hint_above_the_footer_window_is_ignored(self) -> None:
+        older = [f"  transcript line {index}" for index in range(15)]
+        screen = "\n".join(
+            [
+                "  ⠀⠸ Running tools · 2m 28s (esc twice to interrupt)",
+                "  ─────────────────────────── (bypass permissions on) ─",
+                *older,
+                "  ❭ Ask Devin to build features, fix bugs, or work on your code",
+                "  ───────────────────────────────────────────────",
+                "  SWE-2 Max                       Context: 89k / 262k tokens (34%)",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.DEVIN, screen)
+
+    def test_other_agents_ignore_the_devin_hint(self) -> None:
+        screen = "\n".join(
+            [
+                "  ⠀⠸ Running tools · 2m 28s (esc twice to interrupt)",
+                "  ─────────────────────────── (bypass permissions on) ─",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.KIMI, screen)
+
+
 class TestGetGitInfo:
     def test_non_git_dir(self) -> None:
         info = get_git_info("/tmp")

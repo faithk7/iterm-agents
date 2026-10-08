@@ -249,10 +249,33 @@ CURSOR_FOOTER_STALE_SECONDS = 30.0
 
 
 def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
-    """True when the current Cursor footer, not older transcript text, is active."""
-    if agent_type is not AgentType.CURSOR:
-        return False
-    return cursor_activity_signature(screen_text) is not None
+    """True when the agent's composer footer shows a live turn."""
+    if agent_type is AgentType.CURSOR:
+        return cursor_activity_signature(screen_text) is not None
+    if agent_type is AgentType.DEVIN:
+        return devin_screen_shows_active_turn(screen_text)
+    return False
+
+
+def devin_screen_shows_active_turn(screen_text: str) -> bool:
+    """True while Devin's status line shows the interrupt hint.
+
+    A running turn draws ``<activity> · <elapsed> (esc twice to interrupt)``
+    on the line directly above the input box. The hint is redrawn in place,
+    so it only exists on screen while the turn is live. Anchoring it to the
+    box border underneath keeps transcript echoes of the same string from
+    matching.
+    """
+    lines = screen_text.splitlines()
+    for index in range(len(lines) - 2, max(len(lines) - 12, -1), -1):
+        line = lines[index]
+        if (
+            "esc" in line
+            and "to interrupt)" in line
+            and lines[index + 1].lstrip().startswith("──")
+        ):
+            return True
+    return False
 
 
 def cursor_activity_signature(screen_text: str) -> str | None:

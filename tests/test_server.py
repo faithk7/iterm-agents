@@ -78,3 +78,26 @@ class TestAgentMonitorServer:
         assert await server._cursor_state_from_screen(session, "idle") == "running"
         clock["now"] = 31.0
         assert await server._cursor_state_from_screen(session, "idle") == "idle"
+
+    async def test_devin_interrupt_hint_is_running(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        running = "\n".join(
+            [
+                "  ⠀⠸ Running tools · 2m 28s (esc twice to interrupt)",
+                "  ─────────────────────────── (bypass permissions on) ─",
+                "  ❭ Guide Devin while it works",
+                "  ───────────────────────────────────────────────",
+                "  SWE-2 Max                       Context: 89k / 262k tokens (34%)",
+            ]
+        )
+        idle = "\n".join(
+            [
+                "  ─────────────────────────── (bypass permissions on) ─",
+                "  ❭ Ask Devin to build features, fix bugs, or work on your code",
+                "  ───────────────────────────────────────────────",
+                "  SWE-2 Max                       Context: 89k / 262k tokens (34%)",
+            ]
+        )
+
+        assert await server._devin_state_from_screen(_Session(running), "idle") == "running"
+        assert await server._devin_state_from_screen(_Session(idle), "idle") == "idle"
