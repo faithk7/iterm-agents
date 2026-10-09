@@ -254,6 +254,26 @@ def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
         return cursor_activity_signature(screen_text) is not None
     if agent_type is AgentType.DEVIN:
         return devin_screen_shows_active_turn(screen_text)
+    if agent_type is AgentType.CODEX:
+        return codex_screen_shows_active_turn(screen_text)
+    return False
+
+
+def codex_screen_shows_active_turn(screen_text: str) -> bool:
+    """True while Codex's status line shows the interrupt hint.
+
+    A running turn draws ``Working (<elapsed> • esc to interrupt)`` on the
+    line above the composer. The hint is redrawn in place, so it only exists
+    on screen while the turn is live. Anchoring it to the composer prompt
+    below keeps transcript echoes of the same string from matching.
+    """
+    lines = screen_text.splitlines()
+    for index in range(len(lines) - 1, max(len(lines) - 13, -1), -1):
+        if "esc to interrupt)" not in lines[index]:
+            continue
+        for lookahead in range(index + 1, min(index + 5, len(lines))):
+            if lines[lookahead].lstrip().startswith("\u203a"):
+                return True
     return False
 
 

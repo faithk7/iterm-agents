@@ -216,6 +216,8 @@ class AgentMonitorServer:
                     agent_state = await self._cursor_state_from_screen(session, agent_state)
                 elif agent.agent_type is AgentType.DEVIN:
                     agent_state = await self._devin_state_from_screen(session, agent_state)
+                elif agent.agent_type is AgentType.CODEX:
+                    agent_state = await self._codex_state_from_screen(session, agent_state)
 
             sessions_info.append(
                 {
@@ -278,6 +280,15 @@ class AgentMonitorServer:
         """Upgrade an idle Devin session while its interrupt hint is on screen."""
         text = await self._screen_text(session)
         if text is not None and screen_shows_active_turn(AgentType.DEVIN, text):
+            return AgentState.RUNNING.value
+        return agent_state
+
+    async def _codex_state_from_screen(
+        self, session: iterm2.session.Session, agent_state: str
+    ) -> str:
+        """Upgrade an idle Codex session while its interrupt hint is on screen."""
+        text = await self._screen_text(session)
+        if text is not None and screen_shows_active_turn(AgentType.CODEX, text):
             return AgentState.RUNNING.value
         return agent_state
 

@@ -101,3 +101,24 @@ class TestAgentMonitorServer:
 
         assert await server._devin_state_from_screen(_Session(running), "idle") == "running"
         assert await server._devin_state_from_screen(_Session(idle), "idle") == "idle"
+
+    async def test_codex_interrupt_hint_is_running(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        running = "\n".join(
+            [
+                "  • Working (4m 34s • esc to interrupt)",
+                "    └ Tip: Press ⌃r to search previously entered prompts.",
+                "  \u203a Ask Codex to do anything",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+            ]
+        )
+        idle = "\n".join(
+            [
+                "  \u203a Ask Codex to do anything",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+                "  ? for shortcuts",
+            ]
+        )
+
+        assert await server._codex_state_from_screen(_Session(running), "idle") == "running"
+        assert await server._codex_state_from_screen(_Session(idle), "idle") == "idle"

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import os
 import sys
+import tempfile
 from collections.abc import Sequence
+from pathlib import Path
 
 import iterm2
 import iterm2.connection
@@ -12,6 +16,17 @@ import iterm2.connection
 from iterm_agents import __version__
 from iterm_agents.autolaunch import install_autolaunch
 from iterm_agents.server import DEFAULT_PORT, AgentMonitorServer
+
+
+def _acquire_single_instance(lock_path: Path) -> bool:
+    """Hold an advisory lock for the process lifetime; False if already held."""
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    return True
 
 
 async def _run(connection: iterm2.connection.Connection, port: int) -> None:
@@ -58,6 +73,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         result = install_autolaunch(force=args.force)
         action = "installed" if result.changed else "already installed"
         print(f"iterm-agents: AutoLaunch wrapper {action} at {result.path} (mode: {result.mode})")
+        return
+
+    lock_path = Path(tempfile.gettempdir()) / "iterm-agents.lock"
+    if not _acquire_single_instance(lock_path):
+        print("iterm-agents: already running")
         return
 
     try:

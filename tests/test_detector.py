@@ -641,6 +641,77 @@ class TestDevinScreenShowsActiveTurn:
         assert not screen_shows_active_turn(AgentType.KIMI, screen)
 
 
+class TestCodexScreenShowsActiveTurn:
+    def test_working_status_line_above_the_composer(self) -> None:
+        screen = "\n".join(
+            [
+                "  • Explored",
+                "  └ Read index.tsx",
+                "  • Working (4m 34s • esc to interrupt)",
+                "    └ Tip: Press ⌃r to search previously entered prompts.",
+                "  \u203a Ask Codex to do anything",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+                "  ? for shortcuts     ⚠ 1 warning · f2 to view",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.CODEX, screen)
+
+    def test_draft_in_the_composer_still_counts(self) -> None:
+        screen = "\n".join(
+            [
+                "  • Working (12s • esc to interrupt)",
+                "  \u203a follow up on this later",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.CODEX, screen)
+
+    def test_idle_composer_is_not_running(self) -> None:
+        screen = "\n".join(
+            [
+                "  • Explored",
+                "  └ Read index.tsx",
+                "  \u203a Ask Codex to do anything",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+                "  ? for shortcuts",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.CODEX, screen)
+
+    def test_transcript_echo_without_composer_is_ignored(self) -> None:
+        screen = "\n".join(
+            [
+                '  • print("esc to interrupt)")',
+                "  • Explored",
+                "  └ Read index.tsx",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.CODEX, screen)
+
+    def test_hint_above_the_footer_window_is_ignored(self) -> None:
+        older = [f"  transcript line {index}" for index in range(15)]
+        screen = "\n".join(
+            [
+                "  • Working (4m 34s • esc to interrupt)",
+                "    └ Tip: Press ⌃r to search previously entered prompts.",
+                *older,
+                "  \u203a Ask Codex to do anything",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.CODEX, screen)
+
+    def test_other_agents_ignore_the_codex_hint(self) -> None:
+        screen = "\n".join(
+            [
+                "  • Working (4m 34s • esc to interrupt)",
+                "  \u203a Ask Codex to do anything",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.DEVIN, screen)
+
+
 class TestGetGitInfo:
     def test_non_git_dir(self) -> None:
         info = get_git_info("/tmp")
