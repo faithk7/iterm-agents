@@ -256,6 +256,8 @@ def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
         return devin_screen_shows_active_turn(screen_text)
     if agent_type is AgentType.CODEX:
         return codex_screen_shows_active_turn(screen_text)
+    if agent_type is AgentType.KIMI:
+        return kimi_screen_shows_active_turn(screen_text)
     return False
 
 
@@ -273,6 +275,33 @@ def codex_screen_shows_active_turn(screen_text: str) -> bool:
             continue
         for lookahead in range(index + 1, min(index + 5, len(lines))):
             if lines[lookahead].lstrip().startswith("\u203a"):
+                return True
+    return False
+
+
+_KIMI_BUSY_LABELS = ("Working", "Prompting", "Orchestrating", "Queued", "Rate limited")
+
+
+def kimi_screen_shows_active_turn(screen_text: str) -> bool:
+    """True while Kimi's status line shows an in-progress label.
+
+    A live turn draws ``Working…`` (or Prompting/Orchestrating/Queued/
+    Rate limited, all ending in an ellipsis) above the composer box;
+    finished turns end with ``Completed.``, ``Failed.`` and friends. The
+    status line is redrawn in place, so it only exists on screen while the
+    turn is live. Anchoring it to the composer box underneath keeps
+    transcript echoes of the same label from matching.
+    """
+    lines = screen_text.splitlines()
+    for index in range(len(lines) - 1, max(len(lines) - 24, -1), -1):
+        line = lines[index]
+        if not any(
+            f"{label}…" in line or f"{label}..." in line
+            for label in _KIMI_BUSY_LABELS
+        ):
+            continue
+        for lookahead in range(index + 1, min(index + 16, len(lines))):
+            if lines[lookahead].lstrip().startswith(("╭", "│")):
                 return True
     return False
 

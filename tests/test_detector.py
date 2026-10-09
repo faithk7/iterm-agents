@@ -712,6 +712,106 @@ class TestCodexScreenShowsActiveTurn:
         assert not screen_shows_active_turn(AgentType.DEVIN, screen)
 
 
+class TestKimiScreenShowsActiveTurn:
+    def test_working_status_line_above_the_composer(self) -> None:
+        screen = "\n".join(
+            [
+                "  001 [⣿⣦⣀⣀⣀⣀⣀⣀] Let me write the first reque…",
+                "  🌗 Working…  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "   ──────────────────────────────────────────────",
+                "    Todo",
+                "    ● 写 43 条回复 —— 6 …",
+                "    … +1 more (1 done) · ctrl+t to expand",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+                "  Ask When Needed swarm  K2.8 Preview thinking:…",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.KIMI, screen)
+
+    def test_orchestrating_and_rate_limited_variants(self) -> None:
+        for label in ("Orchestrating", "Prompting", "Queued", "Rate limited"):
+            screen = "\n".join(
+                [
+                    f"  🌖 {label}…  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                    "  ╭────────────────────────────────────────────╮",
+                    "  │ >                                          │",
+                    "  ╰────────────────────────────────────────────╯",
+                ]
+            )
+            assert screen_shows_active_turn(AgentType.KIMI, screen), label
+
+    def test_ascii_ellipsis_variant(self) -> None:
+        screen = "\n".join(
+            [
+                "  🌗 Working...  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.KIMI, screen)
+
+    def test_idle_composer_is_not_running(self) -> None:
+        screen = "\n".join(
+            [
+                "  Report done.",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+                "  Ask When Needed K3 thinking: max",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.KIMI, screen)
+
+    def test_terminal_labels_are_not_running(self) -> None:
+        for label in ("Completed.", "Failed.", "Aborted.", "Cancelled."):
+            screen = "\n".join(
+                [
+                    f"  🌕 {label}",
+                    "  ╭────────────────────────────────────────────╮",
+                    "  │ >                                          │",
+                    "  ╰────────────────────────────────────────────╯",
+                ]
+            )
+            assert not screen_shows_active_turn(AgentType.KIMI, screen), label
+
+    def test_transcript_echo_without_composer_is_ignored(self) -> None:
+        screen = "\n".join(
+            [
+                '  • print("Working…")',
+                "  transcript line",
+                "  Ask When Needed K3 thinking: max",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.KIMI, screen)
+
+    def test_label_above_the_footer_window_is_ignored(self) -> None:
+        older = [f"  transcript line {index}" for index in range(30)]
+        screen = "\n".join(
+            [
+                "  🌗 Working…  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                *older,
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.KIMI, screen)
+
+    def test_other_agents_ignore_the_kimi_label(self) -> None:
+        screen = "\n".join(
+            [
+                "  🌗 Working…  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.CODEX, screen)
+
+
 class TestGetGitInfo:
     def test_non_git_dir(self) -> None:
         info = get_git_info("/tmp")

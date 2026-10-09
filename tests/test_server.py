@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from iterm_agents.detector import AgentType
 from iterm_agents.server import DEFAULT_HOST, AgentMonitorServer, _resolve_bound_port
 
 
@@ -99,8 +100,14 @@ class TestAgentMonitorServer:
             ]
         )
 
-        assert await server._devin_state_from_screen(_Session(running), "idle") == "running"
-        assert await server._devin_state_from_screen(_Session(idle), "idle") == "idle"
+        assert (
+            await server._screen_hint_state(_Session(running), AgentType.DEVIN, "idle")
+            == "running"
+        )
+        assert (
+            await server._screen_hint_state(_Session(idle), AgentType.DEVIN, "idle")
+            == "idle"
+        )
 
     async def test_codex_interrupt_hint_is_running(self) -> None:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
@@ -120,5 +127,45 @@ class TestAgentMonitorServer:
             ]
         )
 
-        assert await server._codex_state_from_screen(_Session(running), "idle") == "running"
-        assert await server._codex_state_from_screen(_Session(idle), "idle") == "idle"
+        assert (
+            await server._screen_hint_state(_Session(running), AgentType.CODEX, "idle")
+            == "running"
+        )
+        assert (
+            await server._screen_hint_state(_Session(idle), AgentType.CODEX, "idle")
+            == "idle"
+        )
+
+    async def test_kimi_busy_label_is_running(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        running = "\n".join(
+            [
+                "  001 [⣿⣦⣀⣀⣀⣀⣀⣀] Let me write the first reque…",
+                "  🌗 Working…  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "   ──────────────────────────────────────────────",
+                "    Todo",
+                "    ● 写 43 条回复 —— 6 …",
+                "    … +1 more (1 done) · ctrl+t to expand",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+                "  Ask When Needed swarm  K2.8 Preview thinking:…",
+            ]
+        )
+        idle = "\n".join(
+            [
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+                "  Ask When Needed K3 thinking: max",
+            ]
+        )
+
+        assert (
+            await server._screen_hint_state(_Session(running), AgentType.KIMI, "idle")
+            == "running"
+        )
+        assert (
+            await server._screen_hint_state(_Session(idle), AgentType.KIMI, "idle")
+            == "idle"
+        )

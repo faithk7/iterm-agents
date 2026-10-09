@@ -214,10 +214,10 @@ class AgentMonitorServer:
             if agent is not None and agent.state is AgentState.IDLE:
                 if agent.agent_type is AgentType.CURSOR:
                     agent_state = await self._cursor_state_from_screen(session, agent_state)
-                elif agent.agent_type is AgentType.DEVIN:
-                    agent_state = await self._devin_state_from_screen(session, agent_state)
-                elif agent.agent_type is AgentType.CODEX:
-                    agent_state = await self._codex_state_from_screen(session, agent_state)
+                elif agent.agent_type in (AgentType.DEVIN, AgentType.CODEX, AgentType.KIMI):
+                    agent_state = await self._screen_hint_state(
+                        session, agent.agent_type, agent_state
+                    )
 
             sessions_info.append(
                 {
@@ -274,21 +274,15 @@ class AgentMonitorServer:
         except Exception:
             return None
 
-    async def _devin_state_from_screen(
-        self, session: iterm2.session.Session, agent_state: str
+    async def _screen_hint_state(
+        self,
+        session: iterm2.session.Session,
+        agent_type: AgentType,
+        agent_state: str,
     ) -> str:
-        """Upgrade an idle Devin session while its interrupt hint is on screen."""
+        """Upgrade an idle session while its live-turn hint is on screen."""
         text = await self._screen_text(session)
-        if text is not None and screen_shows_active_turn(AgentType.DEVIN, text):
-            return AgentState.RUNNING.value
-        return agent_state
-
-    async def _codex_state_from_screen(
-        self, session: iterm2.session.Session, agent_state: str
-    ) -> str:
-        """Upgrade an idle Codex session while its interrupt hint is on screen."""
-        text = await self._screen_text(session)
-        if text is not None and screen_shows_active_turn(AgentType.CODEX, text):
+        if text is not None and screen_shows_active_turn(agent_type, text):
             return AgentState.RUNNING.value
         return agent_state
 
