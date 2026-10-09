@@ -272,7 +272,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const awaiting = sessions.filter(s => s.agent_state === 'awaiting_user').length;
       const withAgent = sessions.filter(s => s.agent_type).length;
       document.getElementById('count').textContent =
-        `${running} running / ${awaiting} awaiting / ` +
+        `${running} running / ${awaiting} done / ` +
         `${withAgent} agents / ${sessions.length} sessions`;
     }
 
@@ -333,7 +333,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         case 'running':
           return { cls: 'running', icon: '&#9679;', label: 'running' };
         case 'awaiting_user':
-          return { cls: 'awaiting-user', icon: '&#9670;', label: 'awaiting user' };
+          return { cls: 'awaiting-user', icon: '&#9670;', label: 'done' };
         case 'idle':
           return { cls: 'idle', icon: '&#9675;', label: 'idle' };
         default:
