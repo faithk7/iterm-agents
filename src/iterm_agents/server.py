@@ -191,9 +191,14 @@ class AgentMonitorServer:
                     if pid is not None:
                         session_map[pid] = session
 
-        # Detect agents and map to sessions
+        # Detect agents and map to sessions. Off the event loop: it spawns
+        # `ps`/`pmset` subprocesses that would stall focus requests.
         session_pids = set(session_map.keys())
-        agents = detect_agents(session_pids) if session_pids else []
+        agents = (
+            await asyncio.to_thread(detect_agents, session_pids)
+            if session_pids
+            else []
+        )
         agent_by_session_pid: dict[int, AgentInfo] = {}
         for detected in agents:
             if detected.session_pid is not None:
@@ -207,7 +212,7 @@ class AgentMonitorServer:
             except Exception:
                 path = ""
 
-            git = get_git_info(path) if path else None
+            git = await asyncio.to_thread(get_git_info, path) if path else None
             agent: AgentInfo | None = agent_by_session_pid.get(pid)
             home = os.path.expanduser("~")
             agent_state = agent.state.value if agent else ""
