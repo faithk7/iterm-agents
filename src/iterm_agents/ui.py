@@ -43,12 +43,15 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
   .repo-group { margin-bottom: 10px; }
   .repo-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: #1e1e1e;
     font-size: 11px;
     font-weight: 600;
     color: #dcdcaa;
-    padding: 4px 0 2px 0;
+    padding: 4px 0 6px 0;
     border-bottom: 1px solid #333;
-    margin-bottom: 4px;
     cursor: default;
   }
   .agent {
@@ -90,7 +93,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .agent-type.kimi { background: #4a3a2a; color: #e8c49a; }
   .session-name { color: #d4d4d4; font-size: 11px; margin-top: 2px; }
   .branch { color: #ce9178; font-size: 11px; margin-top: 2px; }
-  .path { color: #6a9955; font-size: 10px; margin-top: 1px; }
   .action-hint { color: #d7ba7d; font-size: 10px; margin-top: 3px; }
   .count {
     font-size: 11px;
@@ -280,11 +282,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         const typeBadge = s.agent_type
           ? `<span class="agent-type ${s.agent_type}">${s.agent_type}</span>`
           : '';
+        const nameLine = s.name && s.name !== s.path
+          ? `<div class="session-name">${esc(s.name)}</div>`
+          : '';
         const branchLine = s.branch
           ? `<div class="branch">${esc(s.branch)}</div>`
-          : '';
-        const pathLine = s.path
-          ? `<div class="path">${esc(s.path)}</div>`
           : '';
         const actionHint = s.awaiting_user
           ? '<div class="action-hint">Click to clear</div>'
@@ -295,9 +297,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
             <span class="status">${meta.icon} ${meta.label}</span>
             ${typeBadge}
           </div>
-          <div class="session-name">${esc(s.name || '(unnamed)')}</div>
+          ${nameLine}
           ${branchLine}
-          ${pathLine}
           ${actionHint}
         </div>`;
       }).join('');
