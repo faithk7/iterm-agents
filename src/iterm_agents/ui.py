@@ -192,11 +192,16 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       for (const el of items) el.classList.remove('focused');
     }
 
-    // A refresh rewriting the row mid-press eats the click, so defer DOM
-    // writes until the button is released.
+    // A refresh rewriting the row eats the click, so defer DOM writes until
+    // the button is released. Click fires just after pointerup, so keep
+    // suppressing briefly or a refresh in that gap still swallows the click.
     let pointerDown = false;
-    document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
-    document.addEventListener('pointerup', () => { pointerDown = false; }, true);
+    let pointerSeq = 0;
+    document.addEventListener('pointerdown', () => { pointerDown = true; pointerSeq++; }, true);
+    document.addEventListener('pointerup', () => {
+      const seq = pointerSeq;
+      setTimeout(() => { if (pointerSeq === seq) pointerDown = false; }, 300);
+    }, true);
     document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
 
     let loadingSessions = false;
