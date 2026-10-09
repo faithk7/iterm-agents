@@ -66,9 +66,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   .agent:hover, .agent.focused { background: #383838; }
   .agent.focused { outline: 1px solid #569cd6; }
-  .agent.running { border-left-color: #4ec9b0; }
-  .agent.awaiting-user { border-left-color: #d7ba7d; background: #332a1c; }
-  .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: #423520; }
+  .agent.running { border-left-color: #d7ba7d; }
+  .agent.awaiting-user { border-left-color: #4ec9b0; background: #1c332a; }
+  .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: #22402f; }
   .agent.idle { border-left-color: #555; }
   .agent-top {
     display: flex;
@@ -76,8 +76,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     justify-content: space-between;
   }
   .status { font-weight: bold; font-size: 11px; }
-  .running .status { color: #4ec9b0; }
-  .awaiting-user .status { color: #d7ba7d; }
+  .running .status { color: #d7ba7d; }
+  .awaiting-user .status { color: #4ec9b0; }
   .idle .status { color: #808080; }
   .agent-type {
     font-size: 10px;
@@ -93,7 +93,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .agent-type.kimi { background: #4a3a2a; color: #e8c49a; }
   .session-name { color: #d4d4d4; font-size: 11px; margin-top: 2px; }
   .branch { color: #ce9178; font-size: 11px; margin-top: 2px; }
-  .action-hint { color: #d7ba7d; font-size: 10px; margin-top: 3px; }
+  .action-hint { color: #4ec9b0; font-size: 10px; margin-top: 3px; }
   .count {
     font-size: 11px;
     color: #808080;
