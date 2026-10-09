@@ -63,6 +63,8 @@ class AgentMonitorServer:
         self._sse_clients: weakref.WeakSet[web.StreamResponse] = weakref.WeakSet()
         self._session_state = SessionStateTracker()
         self._cursor_footer: dict[str, tuple[str, float]] = {}
+        self._scan_lock = asyncio.Lock()
+        self._scan_cache: tuple[float, list[dict[str, str | int]]] = (0.0, [])
 
     @property
     def url(self) -> str:
@@ -171,10 +173,28 @@ class AgentMonitorServer:
     async def _handle_index(self, request: web.Request) -> web.Response:
         return web.Response(text=AGENT_MONITOR_HTML, content_type="text/html")
 
+    _SCAN_CACHE_TTL = 0.9
+
     async def _handle_sessions(self, request: web.Request) -> web.Response:
+        """Serve the latest scan; concurrent or rapid polls share one scan.
+
+        Clicking a session row refetches immediately, so without this cache a
+        burst of clicks runs a full iTerm/git/screen scan per click and the
+        RPC pipe backs up. The cache holds the raw scan; SessionStateTracker
+        runs per request on copies so acknowledged flags clear correctly.
+        """
+        async with self._scan_lock:
+            timestamp, raw = self._scan_cache
+            if time.monotonic() - timestamp > self._SCAN_CACHE_TTL:
+                raw = await self._scan_sessions()
+                self._scan_cache = (time.monotonic(), raw)
+            sessions = self._session_state.apply([dict(s) for s in raw])
+            return web.json_response(sessions)
+
+    async def _scan_sessions(self) -> list[dict[str, str | int]]:
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
-            return web.json_response([])
+            return []
 
         # Collect session PIDs for agent-session mapping
         session_map: dict[int, iterm2.session.Session] = {}
@@ -238,8 +258,6 @@ class AgentMonitorServer:
                 }
             )
 
-        self._session_state.apply(sessions_info)
-
         # Sort: running first, then completion-waiting, idle, then non-agents
         state_priority = {"running": 0, "awaiting_user": 1, "idle": 2}
         sessions_info.sort(
@@ -249,7 +267,7 @@ class AgentMonitorServer:
             )
         )
 
-        return web.json_response(sessions_info)
+        return sessions_info
 
     async def _handle_focus(self, request: web.Request) -> web.Response:
         session_id = request.query.get("session", "")
