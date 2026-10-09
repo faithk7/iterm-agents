@@ -52,8 +52,17 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     color: #dcdcaa;
     padding: 4px 0 6px 0;
     border-bottom: 1px solid #333;
-    cursor: default;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
   }
+  .repo-header .chevron {
+    color: #808080;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .repo-header:hover .chevron { color: #d4d4d4; }
   .agent {
     padding: 5px 8px;
     margin: 3px 0;
@@ -112,7 +121,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 <body>
   <div class="header">
     <span class="title">Agents</span>
-    <button class="refresh-btn" onclick="loadSessions()">&#8635;</button>
+    <span>
+      <button class="refresh-btn" title="Collapse all" onclick="toggleCollapseAll()">&#8847;</button>
+      <button class="refresh-btn" onclick="loadSessions()">&#8635;</button>
+    </span>
   </div>
   <input type="text" class="search-box" id="search"
          placeholder="Search by name, repo, branch..."
@@ -204,15 +216,40 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }, true);
     document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
 
+    // Collapsed repo keys; persists across the per-second re-render.
+    const collapsedRepos = new Set();
+
+    document.getElementById('sessions').addEventListener('click', (e) => {
+      const header = e.target.closest('.repo-header');
+      if (header) toggleGroup(header.parentElement.dataset.key);
+    });
+
+    function toggleGroup(key) {
+      if (collapsedRepos.has(key)) collapsedRepos.delete(key);
+      else collapsedRepos.add(key);
+      filterSessions(true);
+    }
+
+    function toggleCollapseAll() {
+      const keys = [...document.querySelectorAll('.repo-group')]
+        .map(g => g.dataset.key);
+      const expand = keys.every(k => collapsedRepos.has(k));
+      for (const key of keys) {
+        if (expand) collapsedRepos.delete(key);
+        else collapsedRepos.add(key);
+      }
+      filterSessions(true);
+    }
+
     let loadingSessions = false;
 
-    async function loadSessions() {
+    async function loadSessions(force) {
       if (loadingSessions) return;
       loadingSessions = true;
       try {
         const res = await fetch('/api/sessions');
         allSessions = await res.json();
-        filterSessions();
+        filterSessions(force);
       } catch(e) {
         document.getElementById('sessions').innerHTML =
           '<div class="no-results">Failed to load sessions<br>' + esc(String(e)) + '</div>';
@@ -221,7 +258,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       }
     }
 
-    function filterSessions() {
+    function filterSessions(force) {
       const q = document.getElementById('search').value.toLowerCase();
       const filtered = q
         ? allSessions.filter(s =>
@@ -230,10 +267,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
             ))
         : allSessions;
       focusedIndex = -1;
-      renderSessions(filtered);
+      renderSessions(filtered, force);
     }
 
-    function renderSessions(sessions) {
+    function renderSessions(sessions, force) {
       const container = document.getElementById('sessions');
       if (sessions.length === 0) {
         container.innerHTML = '<div class="no-results">No sessions found</div>';
@@ -269,7 +306,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         html += renderGroup('(no repo)', '', noRepo);
       }
 
-      if (!pointerDown) {
+      // pointerDown suppresses stray interval writes mid-click; renders a
+      // click handler asked for are safe — the click already dispatched.
+      if (force || !pointerDown) {
         container.innerHTML = html;
       }
 
@@ -309,12 +348,15 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       }).join('');
 
       const titleAttr = repoPath ? ` title="${esc(repoPath)}"` : '';
+      const isCollapsed = collapsedRepos.has(repoPath);
+      const chevron = isCollapsed ? '&#9656;' : '&#9662;';
 
-      return `<div class="repo-group">
+      return `<div class="repo-group" data-key="${esc(repoPath).replace(/"/g, '&quot;')}">
         <div class="repo-header"${titleAttr}>
           <span>${esc(repoName)}</span>
+          <span class="chevron">${chevron}</span>
         </div>
-        ${sessionsHtml}
+        ${isCollapsed ? '' : sessionsHtml}
       </div>`;
     }
 
@@ -349,7 +391,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     async function focusSession(sessionId) {
       try {
         await fetch('/api/focus?session=' + encodeURIComponent(sessionId));
-        await loadSessions();
+        await loadSessions(true);
       } catch(e) {}
     }
 
