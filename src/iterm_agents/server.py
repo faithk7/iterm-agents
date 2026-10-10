@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 import weakref
@@ -65,6 +66,7 @@ class AgentMonitorServer:
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
         self._scan_cache: tuple[float, list[dict[str, str | int]]] = (0.0, [])
+        self._toolbelt_ready_windows: set[str] = set()
 
     @property
     def url(self) -> str:
@@ -91,11 +93,11 @@ class AgentMonitorServer:
             url=self.url,
         )
 
-        await self._ensure_toolbelt_visible()
+        self._toolbelt_ready_windows.update(await self._ensure_toolbelts_visible(None))
         self._keystroke_task = asyncio.ensure_future(self._monitor_keystroke())
 
     async def _ensure_toolbelt_visible(self) -> None:
-        """Show the Toolbelt panel if it's not already visible.
+        """Show the Toolbelt in the key window if it's not already visible.
 
         The Show Toolbelt item is disabled while iTerm2 is in the background.
         Selecting it then raises MenuItemException and used to take the whole
@@ -115,6 +117,82 @@ class AgentMonitorServer:
                 )
         except iterm2.mainmenu.MenuItemException:
             return
+
+    async def _ensure_toolbelts_visible(self, window_ids: set[str] | None) -> set[str]:
+        """Show the Toolbelt in each window; returns ids confirmed showing it.
+
+        Toolbelt visibility is per window and Show Toolbelt only toggles the
+        key window's, so each other target is briefly made key first, then the
+        original key window is restored. `None` means every window. While
+        iTerm2 is in the background the item is disabled; bail before
+        activating anything and let the caller retry unconfirmed ids later.
+        """
+        ensured: set[str] = set()
+        if _SHOW_TOOLBELT_ID is None:
+            return ensured
+        try:
+            iterm2_app = await iterm2.app.async_get_app(self.connection)
+        except Exception:
+            return ensured
+        if iterm2_app is None:
+            return ensured
+
+        try:
+            gate = await iterm2.mainmenu.MainMenu.async_get_menu_item_state(
+                self.connection,
+                _SHOW_TOOLBELT_ID,
+            )
+        except iterm2.mainmenu.MenuItemException:
+            return ensured
+        if not gate.enabled:
+            return ensured
+
+        key_id = (
+            iterm2_app.current_window.window_id
+            if iterm2_app.current_window is not None
+            else None
+        )
+        targets = [
+            w
+            for w in iterm2_app.terminal_windows
+            if window_ids is None or w.window_id in window_ids
+        ]
+        targets.sort(key=lambda w: w.window_id != key_id)
+        activated_other = False
+        try:
+            for window in targets:
+                try:
+                    if window.window_id != key_id:
+                        await window.async_activate()
+                        activated_other = True
+                        await iterm2_app.async_refresh_focus()
+                        if iterm2_app.current_terminal_window_id != window.window_id:
+                            # Another space, a hotkey window, or closed: the
+                            # menu item would hit the wrong window.
+                            continue
+                    state = (
+                        gate
+                        if window.window_id == key_id
+                        else await iterm2.mainmenu.MainMenu.async_get_menu_item_state(
+                            self.connection,
+                            _SHOW_TOOLBELT_ID,
+                        )
+                    )
+                    if not state.checked:
+                        await iterm2.mainmenu.MainMenu.async_select_menu_item(
+                            self.connection,
+                            _SHOW_TOOLBELT_ID,
+                        )
+                    ensured.add(window.window_id)
+                except Exception:
+                    continue
+        finally:
+            if activated_other and key_id is not None:
+                key_window = iterm2_app.get_window_by_id(key_id)
+                if key_window is not None:
+                    with contextlib.suppress(Exception):
+                        await key_window.async_activate()
+        return ensured
 
     async def _monitor_keystroke(self) -> None:
         """Monitor for Cmd+Shift+M to send focus event to WebView via SSE."""
@@ -195,6 +273,16 @@ class AgentMonitorServer:
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
             return []
+
+        # A window opened after startup hides its toolbelt; open it once.
+        # A window the user hides by hand stays marked and is not reopened.
+        window_ids = {w.window_id for w in iterm2_app.terminal_windows}
+        self._toolbelt_ready_windows.intersection_update(window_ids)
+        new_window_ids = window_ids - self._toolbelt_ready_windows
+        if new_window_ids:
+            self._toolbelt_ready_windows.update(
+                await self._ensure_toolbelts_visible(new_window_ids)
+            )
 
         # Collect session PIDs for agent-session mapping
         session_map: dict[int, iterm2.session.Session] = {}

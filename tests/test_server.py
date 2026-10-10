@@ -44,6 +44,88 @@ _FROZEN_FOOTER = "\n".join(
 )
 
 
+class _State:
+    def __init__(self, checked: bool, enabled: bool) -> None:
+        self.checked = checked
+        self.enabled = enabled
+
+
+class _ScanSession:
+    def __init__(self, pid: int) -> None:
+        self.session_id = f"s-{pid}"
+        self.name = ""
+        self._pid = pid
+
+    async def async_get_variable(self, name: str) -> object:
+        return self._pid if name == "pid" else ""
+
+
+class _ScanTab:
+    def __init__(self, sessions: list[_ScanSession]) -> None:
+        self.sessions = sessions
+
+
+class _ToolbeltWindow:
+    def __init__(self, window_id: str, app: _App, becomes_key: bool = True) -> None:
+        self.window_id = window_id
+        self._app = app
+        self._becomes_key = becomes_key
+        self.tabs: list[_ScanTab] = []
+
+    async def async_activate(self) -> None:
+        self._app.activations.append(self.window_id)
+        if self._becomes_key:
+            self._app.current_terminal_window_id = self.window_id
+
+
+class _App:
+    """Fake iTerm2 app: menu state and toggles are tracked per key window."""
+
+    def __init__(self, shown: dict[str, bool], enabled: bool = True) -> None:
+        self.shown = shown
+        self.enabled = enabled
+        self.activations: list[str] = []
+        self.current_terminal_window_id = next(iter(shown), None)
+        self.terminal_windows = [
+            _ToolbeltWindow(window_id, self) for window_id in shown
+        ]
+
+    @property
+    def current_window(self) -> _ToolbeltWindow | None:
+        return self.get_window_by_id(self.current_terminal_window_id)
+
+    def get_window_by_id(self, window_id: str | None) -> _ToolbeltWindow | None:
+        return next(
+            (w for w in self.terminal_windows if w.window_id == window_id), None
+        )
+
+    async def async_refresh_focus(self) -> None:
+        pass
+
+    async def async_get_menu_item_state(self, _connection: object, _identifier: str) -> _State:
+        return _State(self.shown.get(self.current_terminal_window_id, False), self.enabled)
+
+    async def async_select_menu_item(self, _connection: object, _identifier: str) -> None:
+        window_id = self.current_terminal_window_id
+        if window_id is not None:
+            self.shown[window_id] = not self.shown.get(window_id, False)
+
+
+def _patch_iterm(monkeypatch: pytest.MonkeyPatch, app: _App) -> None:
+    async def fake_get_app(_connection: object) -> _App:
+        return app
+
+    monkeypatch.setattr("iterm_agents.server.iterm2.app.async_get_app", fake_get_app)
+    monkeypatch.setattr(
+        "iterm_agents.server.iterm2.mainmenu.MainMenu.async_get_menu_item_state",
+        app.async_get_menu_item_state,
+    )
+    monkeypatch.setattr(
+        "iterm_agents.server.iterm2.mainmenu.MainMenu.async_select_menu_item",
+        app.async_select_menu_item,
+    )
+
+
 class TestResolveBoundPort:
     def test_resolves_ipv4_port(self) -> None:
         assert _resolve_bound_port([("127.0.0.1", 50123)]) == 50123
@@ -169,3 +251,89 @@ class TestAgentMonitorServer:
             await server._screen_hint_state(_Session(idle), AgentType.KIMI, "idle")
             == "idle"
         )
+
+    async def test_toolbelt_shown_in_every_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # w1 is key and already showing; w2 and w3 are hidden.
+        app = _App({"w1": True, "w2": False, "w3": False})
+        _patch_iterm(monkeypatch, app)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+
+        ensured = await server._ensure_toolbelts_visible({"w1", "w2", "w3"})
+
+        assert ensured == {"w1", "w2", "w3"}
+        assert app.shown == {"w1": True, "w2": True, "w3": True}
+        # Non-key windows were made key, toggled, and focus was restored.
+        assert app.activations == ["w2", "w3", "w1"]
+
+    async def test_toolbelt_already_shown_skips_toggle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _App({"w1": True, "w2": True})
+        _patch_iterm(monkeypatch, app)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+
+        ensured = await server._ensure_toolbelts_visible({"w1", "w2"})
+
+        assert ensured == {"w1", "w2"}
+        assert app.shown == {"w1": True, "w2": True}
+
+    async def test_toolbelt_disabled_menu_stays_hidden(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # iTerm2 in the background: don't activate or toggle anything.
+        app = _App({"w1": False, "w2": False}, enabled=False)
+        _patch_iterm(monkeypatch, app)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+
+        ensured = await server._ensure_toolbelts_visible({"w1", "w2"})
+
+        assert ensured == set()
+        assert app.activations == []
+        assert app.shown == {"w1": False, "w2": False}
+
+    async def test_toolbelt_window_that_cannot_take_key_is_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _App({"w1": True, "w2": False, "w3": False})
+        for window in app.terminal_windows:
+            if window.window_id == "w2":
+                window._becomes_key = False
+        _patch_iterm(monkeypatch, app)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+
+        ensured = await server._ensure_toolbelts_visible({"w2", "w3"})
+
+        # w2 could not become key, so its menu item was never hit; w3 got it.
+        assert ensured == {"w3"}
+        assert app.shown == {"w1": True, "w2": False, "w3": True}
+        assert app.activations == ["w2", "w3", "w1"]
+
+    async def test_scan_ensures_new_windows_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _App({"w1": False})
+        app.terminal_windows[0].tabs = [_ScanTab([_ScanSession(11)])]
+        _patch_iterm(monkeypatch, app)
+        monkeypatch.setattr("iterm_agents.server.detect_agents", lambda _pids: [])
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        calls: list[set[str]] = []
+
+        async def fake_ensure(window_ids: set[str]) -> set[str]:
+            calls.append(set(window_ids))
+            return set(window_ids)
+
+        monkeypatch.setattr(server, "_ensure_toolbelts_visible", fake_ensure)
+
+        await server._scan_sessions()
+        assert calls == [{"w1"}]
+
+        # Already-ensured windows are not requested again.
+        await server._scan_sessions()
+        assert calls == [{"w1"}]
+
+        # A window opened later is requested once.
+        window = _ToolbeltWindow("w2", app)
+        window.tabs = [_ScanTab([_ScanSession(22)])]
+        app.terminal_windows.append(window)
+        await server._scan_sessions()
+        assert calls == [{"w1"}, {"w2"}]
