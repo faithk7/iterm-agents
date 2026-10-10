@@ -26,6 +26,7 @@ let writes = 0;
 let escapeElements = 0;
 let cards = [];
 const scrolls = [];
+const focusRequests = [];
 const cardPositions = {one: 1650, two: 2650};
 const viewport = {
   innerHeight: 900, scrollY: 600, addEventListener() {},
@@ -37,11 +38,20 @@ const viewport = {
 };
 const timeouts = [];
 const listeners = {};
+const documentListeners = {};
+const elementListeners = {};
 const elements = new Map();
+let hitTestCard = null;
+function addListener(registry, key, name, fn) {
+  if (!registry[key]) registry[key] = {};
+  if (!registry[key][name]) registry[key][name] = [];
+  registry[key][name].push(fn);
+}
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
     value: '', textContent: '', disabled: false,
-    focus() {}, addEventListener() {},
+    focus() {},
+    addEventListener(name, fn) { addListener(elementListeners, id, name, fn); },
     set innerHTML(html) {
       if (id === 'sessions') {
         writes++;
@@ -72,7 +82,8 @@ const context = vm.createContext({
   document: {
     hasFocus: () => false,
     getElementById: element,
-    addEventListener() {},
+    addEventListener(name, fn) { addListener(documentListeners, 'document', name, fn); },
+    elementFromPoint: () => hitTestCard,
     querySelectorAll: () => cards,
     querySelector: selector => selector === '.agent.current'
       ? cards.find(card => card.classList.contains('current')) : cards[0],
@@ -82,8 +93,13 @@ const context = vm.createContext({
     },
   },
   window: viewport,
-  fetch: url => url.startsWith('/api/focus')
-    ? Promise.resolve({ ok: true }) : new Promise(() => {}),
+  fetch: url => {
+    if (url.startsWith('/api/focus')) {
+      focusRequests.push(url);
+      return Promise.resolve({ ok: true });
+    }
+    return new Promise(() => {});
+  },
   setInterval() {},
   setTimeout: fn => timeouts.push(fn),
   EventSource: class {
@@ -140,6 +156,72 @@ assert.equal(status.innerHTML, '&#9675; idle');
 assert.ok(!element('sessions').innerHTML.includes('hidden'));
 assert.ok(element('count').textContent.includes('0 done'));
 (async () => {
+  const pressedCard = { dataset: {session: 'two'} };
+  const currentClickCard = {
+    dataset: {session: 'one'},
+    closest: selector => selector === '.agent' ? currentClickCard : null,
+  };
+  hitTestCard = currentClickCard;
+  const beforePress = focusRequests.length;
+  documentListeners.document.pointerdown[0]({
+    target: { closest: selector => selector === '.agent' ? pressedCard : null },
+    button: 0,
+    pointerType: 'mouse',
+    clientX: 42,
+    clientY: 84,
+  });
+  assert.equal(
+    focusRequests.length, beforePress + 1,
+    'a press must activate even when WebKit never dispatches pointerup or click',
+  );
+  assert.equal(new URL('http://panel' + focusRequests.at(-1)).searchParams.get('session'), 'two');
+  elementListeners.sessions.click[0]({
+    detail: 1,
+    clientX: 42,
+    clientY: 300,
+    target: {
+      closest: selector => selector === '.agent' ? currentClickCard : null,
+    },
+  });
+  documentListeners.document.pointerup[0]();
+  while (timeouts.length) timeouts.shift()();
+  await Promise.resolve();
+  const captured = new URL('http://panel' + focusRequests.at(-1));
+  assert.equal(
+    captured.searchParams.get('session'),
+    'one',
+    'a stale press from another window must not replace the current hit target',
+  );
+
+  const beforeCompleteClick = focusRequests.length;
+  documentListeners.document.pointerdown[0]({
+    target: { closest: selector => selector === '.agent' ? currentClickCard : null },
+    button: 0, pointerType: 'mouse', clientX: 42, clientY: 300,
+  });
+  elementListeners.sessions.click[0]({
+    detail: 1, clientX: 42, clientY: 300,
+    target: { closest: selector => selector === '.agent' ? currentClickCard : null },
+  });
+  assert.equal(focusRequests.length, beforeCompleteClick + 1,
+    'one press/click sends one activation');
+
+  const beforeRightClick = focusRequests.length;
+  documentListeners.document.pointerdown[0]({
+    target: { closest: selector => selector === '.agent' ? currentClickCard : null },
+    button: 2, pointerType: 'mouse', clientX: 42, clientY: 300,
+  });
+  assert.equal(focusRequests.length, beforeRightClick,
+    'right-click must only open the action menu');
+  elementListeners.sessions.click[0]({
+    detail: 0, clientX: 0, clientY: 0,
+    target: { closest: selector => selector === '.agent' ? pressedCard : null },
+  });
+  assert.equal(new URL('http://panel' + focusRequests.at(-1)).searchParams.get('session'), 'two',
+    'keyboard activation uses its selected card rather than screen coordinates');
+  documentListeners.document.pointerup[0]();
+  while (timeouts.length) timeouts.shift()();
+  await Promise.resolve();
+
   for (let i = 0; i < 3; i++) {
     await vm.runInContext("focusSession('one')", context);
     assert.equal(writes, initialWrites);

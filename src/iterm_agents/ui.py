@@ -223,7 +223,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // Use multiple strategies since embedded WebViews may not fire focus events.
     // Never steal focus from an open context menu or label editor.
     function focusSearch() {
-      if (ctxMenu || labelEditorOpen) return;
+      if (pointerDown || ctxMenu || labelEditorOpen) return;
       document.getElementById('search').focus({ preventScroll: true });
     }
     let hadFocus = document.hasFocus();
@@ -293,19 +293,72 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // suppressing briefly or a refresh in that gap still swallows the click.
     let pointerDown = false;
     let pointerSeq = 0;
-    document.addEventListener('pointerdown', () => { pointerDown = true; pointerSeq++; }, true);
+    let pressedX = '';
+    let pressedY = '';
+    let pressedAt = 0;
+    let activatedOnPress = false;
+    document.addEventListener('pointerdown', (e) => {
+      pointerDown = true;
+      const seq = ++pointerSeq;
+      // Window changes can interrupt pointerup/click in the Toolbelt WebView.
+      // Bound the render guard even when the release event never arrives.
+      setTimeout(() => { if (pointerSeq === seq) pointerDown = false; }, 1000);
+      const card = e.target.closest && e.target.closest('.agent');
+      pressedX = Number.isFinite(e.clientX) ? String(e.clientX) : '';
+      pressedY = Number.isFinite(e.clientY) ? String(e.clientY) : '';
+      pressedAt = Date.now();
+      activatedOnPress = !!card && e.button === 0 &&
+        (!e.pointerType || e.pointerType === 'mouse');
+      if (activatedOnPress) {
+        focusSession(card.dataset.session);
+      }
+    }, true);
     document.addEventListener('pointerup', () => {
       const seq = pointerSeq;
       setTimeout(() => { if (pointerSeq === seq) pointerDown = false; }, 300);
     }, true);
-    document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
+    document.addEventListener('pointercancel', () => {
+      pointerDown = false;
+      pressedX = '';
+      pressedY = '';
+      activatedOnPress = false;
+    }, true);
+    window.addEventListener('blur', () => { pointerDown = false; });
 
     // Collapsed repo keys; persists across the per-second re-render.
     const collapsedRepos = new Set();
 
     document.getElementById('sessions').addEventListener('click', (e) => {
       const header = e.target.closest('.repo-header');
-      if (header) toggleGroup(header.parentElement.dataset.key);
+      if (header) {
+        toggleGroup(header.parentElement.dataset.key);
+        return;
+      }
+      const card = e.target.closest('.agent');
+      if (card) {
+        const clickedSessionId = card.dataset.session;
+        const keyboardClick = e.detail === 0;
+        const samePress = !keyboardClick && activatedOnPress &&
+          Date.now() - pressedAt < 1000 &&
+          Math.abs(e.clientX - Number(pressedX)) < 5 &&
+          Math.abs(e.clientY - Number(pressedY)) < 5;
+        activatedOnPress = false;
+        if (samePress) {
+          pressedX = '';
+          pressedY = '';
+          return;
+        }
+        const hit = !keyboardClick && document.elementFromPoint && Number.isFinite(e.clientX)
+          ? document.elementFromPoint(e.clientX, e.clientY) : null;
+        const hitCard = hit && hit.closest ? hit.closest('.agent') : null;
+        // elementFromPoint reflects the card currently visible beneath the
+        // pointer. This avoids both stale WebKit click targets and stale press
+        // state carried across an iTerm window switch.
+        const sessionId = hitCard ? hitCard.dataset.session : clickedSessionId;
+        pressedX = '';
+        pressedY = '';
+        focusSession(sessionId);
+      }
     });
 
     // Right-click a card for its action menu. The menu and the label editor
@@ -616,7 +669,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           ? '<div class="action-hint">Click to clear</div>'
           : '';
         return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}"
-                     data-session="${s.id}" onclick="focusSession('${s.id}')">
+                     data-session="${s.id}">
           <div class="agent-top">
             <span class="status">${meta.icon} ${meta.label}</span>
             ${typeBadge}

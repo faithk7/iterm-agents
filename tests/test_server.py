@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from iterm_agents.detector import AgentType, GitInfo
@@ -59,6 +61,64 @@ class _ScanSession:
 
     async def async_get_variable(self, name: str) -> object:
         return self._pid if name == "pid" else self._path
+
+
+class _FocusRequest:
+    def __init__(self, session_id: str) -> None:
+        self.query = {"session": session_id}
+
+
+class _BlockingActivateSession:
+    def __init__(
+        self,
+        session_id: str,
+        starts: list[str],
+        active: list[int],
+        max_active: list[int],
+    ) -> None:
+        self.session_id = session_id
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self._starts = starts
+        self._active = active
+        self._max_active = max_active
+
+    async def async_activate(self) -> None:
+        self._starts.append(self.session_id)
+        self._active[0] += 1
+        self._max_active[0] = max(self._max_active[0], self._active[0])
+        self.started.set()
+        try:
+            await self.release.wait()
+        finally:
+            self._active[0] -= 1
+
+
+class _GatedScanSession(_ScanSession):
+    def __init__(
+        self,
+        pid: int,
+        calls: list[str],
+        scan_saturated: asyncio.Event,
+        release_scan: asyncio.Event,
+        focus_started: asyncio.Event,
+    ) -> None:
+        super().__init__(pid)
+        self._calls = calls
+        self._scan_saturated = scan_saturated
+        self._release_scan = release_scan
+        self._focus_started = focus_started
+
+    async def async_get_variable(self, name: str) -> object:
+        self._calls.append(f"scan:{self.session_id}:{name}")
+        if len(self._calls) >= 4:
+            self._scan_saturated.set()
+        await self._release_scan.wait()
+        return await super().async_get_variable(name)
+
+    async def async_activate(self) -> None:
+        self._calls.append("focus")
+        self._focus_started.set()
 
 
 class _ScanTab:
@@ -417,3 +477,85 @@ class TestAgentMonitorServer:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
 
         assert not server._patch_focused_session("ghost")
+
+    async def test_rapid_focus_requests_coalesce_to_latest_without_overlapping(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        starts: list[str] = []
+        active = [0]
+        max_active = [0]
+        sessions = {
+            session_id: _BlockingActivateSession(session_id, starts, active, max_active)
+            for session_id in ("s-1", "s-2", "s-3")
+        }
+        server._sessions_by_id = sessions  # type: ignore[assignment]
+        server._scan_cache = (
+            1.0,
+            [{"id": session_id, "focused": False} for session_id in sessions],
+        )
+
+        # HTTP handlers must acknowledge clicks immediately; one worker owns
+        # iTerm's activation RPC and drops intermediate targets while busy.
+        await asyncio.wait_for(
+            server._handle_focus(_FocusRequest("s-1")),  # type: ignore[arg-type]
+            timeout=1,
+        )
+        await asyncio.wait_for(sessions["s-1"].started.wait(), timeout=1)
+        await asyncio.wait_for(
+            server._handle_focus(_FocusRequest("s-2")),  # type: ignore[arg-type]
+            timeout=1,
+        )
+        await asyncio.wait_for(
+            server._handle_focus(_FocusRequest("s-3")),  # type: ignore[arg-type]
+            timeout=1,
+        )
+
+        assert starts == ["s-1"]
+        assert max_active == [1]
+
+        sessions["s-1"].release.set()
+        await asyncio.wait_for(sessions["s-3"].started.wait(), timeout=1)
+        assert starts == ["s-1", "s-3"]
+        assert not sessions["s-2"].started.is_set()
+        assert max_active == [1]
+
+        sessions["s-3"].release.set()
+        assert server._focus_worker_task is not None
+        await asyncio.wait_for(server._focus_worker_task, timeout=1)
+        assert server._focused_ids == {"s-3"}
+
+    async def test_focus_is_not_queued_behind_the_whole_session_scan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        scan_saturated = asyncio.Event()
+        release_scan = asyncio.Event()
+        focus_started = asyncio.Event()
+        sessions = [
+            _GatedScanSession(
+                pid,
+                calls,
+                scan_saturated,
+                release_scan,
+                focus_started,
+            )
+            for pid in range(20)
+        ]
+        app = _App({"w1": True})
+        app.terminal_windows[0].tabs = [_ScanTab(sessions)]
+        _patch_iterm(monkeypatch, app)
+        monkeypatch.setattr("iterm_agents.server.detect_agents", lambda _pids: [])
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._toolbelt_ready_windows = {"w1"}
+
+        scan_task = asyncio.create_task(server._scan_sessions())
+        await asyncio.wait_for(scan_saturated.wait(), timeout=1)
+        await asyncio.sleep(0)
+        await server._handle_focus(  # type: ignore[arg-type]
+            _FocusRequest(sessions[-1].session_id)
+        )
+        await asyncio.wait_for(focus_started.wait(), timeout=1)
+
+        assert calls.index("focus") <= 4
+
+        release_scan.set()
+        await asyncio.wait_for(scan_task, timeout=1)

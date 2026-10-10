@@ -89,11 +89,14 @@ class AgentMonitorServer:
         self._session_state = SessionStateTracker()
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
+        self._scan_rpc_gate = asyncio.Semaphore(self._SCAN_RPC_CONCURRENCY)
         self._scan_cache: tuple[float, list[dict[str, str | int]]] = (0.0, [])
         self._toolbelt_ready_windows: set[str] = set()
         self._git_cache: dict[str, tuple[float, GitInfo]] = {}
         self._keystroke_task: asyncio.Task[None] | None = None
         self._focus_task: asyncio.Task[None] | None = None
+        self._focus_worker_task: asyncio.Task[None] | None = None
+        self._pending_focus_id: str | None = None
         self._focused_ids: set[str] = set()
         self._sessions_by_id: dict[str, iterm2.session.Session] = {}
         self._detached_tasks: set[asyncio.Task[None]] = set()
@@ -340,6 +343,7 @@ class AgentMonitorServer:
         return web.Response(text=AGENT_MONITOR_HTML, content_type="text/html")
 
     _SCAN_CACHE_TTL = 0.9
+    _SCAN_RPC_CONCURRENCY = 4
 
     async def _handle_sessions(self, request: web.Request) -> web.Response:
         """Serve the latest scan; concurrent or rapid polls share one scan.
@@ -374,9 +378,10 @@ class AgentMonitorServer:
             )
 
         # Collect session PIDs for agent-session mapping. Fetching pid and
-        # path per session serially costs two RPC round trips per session;
-        # gathering sends them all at once. The id map lets focus clicks and
-        # focus-change updates skip a full app snapshot entirely.
+        # path per session serially costs two RPC round trips per session. The
+        # gather is bounded by _scan_rpc_gate so a focus request can enter the
+        # shared iTerm connection between small batches. The id map then lets
+        # focus clicks and focus-change updates skip a full app snapshot.
         all_sessions = [
             session
             for window in iterm2_app.terminal_windows
@@ -385,8 +390,8 @@ class AgentMonitorServer:
         ]
         self._sessions_by_id = {s.session_id: s for s in all_sessions}
         pids, paths = await asyncio.gather(
-            asyncio.gather(*(_session_variable(s, "pid") for s in all_sessions)),
-            asyncio.gather(*(_session_variable(s, "path") for s in all_sessions)),
+            asyncio.gather(*(self._scan_session_variable(s, "pid") for s in all_sessions)),
+            asyncio.gather(*(self._scan_session_variable(s, "path") for s in all_sessions)),
         )
         session_map: dict[int, iterm2.session.Session] = {}
         session_paths: dict[int, str] = {}
@@ -451,6 +456,13 @@ class AgentMonitorServer:
         # never moves a card out from under the cursor.
         return sessions_info
 
+    async def _scan_session_variable(
+        self, session: iterm2.session.Session, name: str
+    ) -> object:
+        """Read scan metadata without flooding iTerm's focus RPC queue."""
+        async with self._scan_rpc_gate:
+            return await _session_variable(session, name)
+
     _GIT_CACHE_TTL = 5.0
 
     async def _git_for(self, path: str) -> GitInfo | None:
@@ -494,11 +506,38 @@ class AgentMonitorServer:
         }
 
     async def _handle_focus(self, request: web.Request) -> web.Response:
-        """Focus a session's pane; also clears its done mark."""
+        """Queue a pane focus and clear its done mark without blocking the UI."""
         session_id = request.query.get("session", "")
         if not session_id:
             return web.Response(text="no session id", status=400)
         self._session_state.acknowledge(session_id)
+
+        # iTerm serializes activation work internally. Letting every HTTP click
+        # issue its own RPC makes fast cross-window clicks pile up and sometimes
+        # complete out of order. One worker owns that RPC stream; while it is
+        # busy, only the most recent requested destination matters.
+        self._pending_focus_id = session_id
+        if self._focus_worker_task is None or self._focus_worker_task.done():
+            self._focus_worker_task = asyncio.create_task(self._drain_focus_requests())
+        return web.Response(text="ok")
+
+    async def _drain_focus_requests(self) -> None:
+        """Activate the current target, coalescing queued clicks to the latest."""
+        try:
+            while self._pending_focus_id is not None:
+                session_id = self._pending_focus_id
+                self._pending_focus_id = None
+                try:
+                    await self._activate_session(session_id)
+                except Exception:
+                    # A pane can close between the click and activation. Keep
+                    # draining so a newer click cannot be stranded behind it.
+                    continue
+        finally:
+            self._focus_worker_task = None
+
+    async def _activate_session(self, session_id: str) -> None:
+        """Activate one session, using the cached object before a full lookup."""
 
         # Fast path: the session object from the last scan activates in a
         # single RPC — a fresh app snapshot costs hundreds of ms.
@@ -510,21 +549,22 @@ class AgentMonitorServer:
                 pass  # closed between scan and click; fall through to lookup
             else:
                 if self._patch_focused_session(session_id):
-                    await self._broadcast_focus()
-                return web.Response(text="ok")
+                    self._spawn_detached(self._broadcast_focus())
+                return
 
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
-            return web.Response(text="app not found", status=500)
+            return
 
         for window in iterm2_app.terminal_windows:
             for tab in window.tabs:
                 for session in tab.sessions:
                     if session.session_id == session_id:
                         await session.async_activate()
-                        return web.Response(text="ok")
-
-        return web.Response(text="not found", status=404)
+                        self._sessions_by_id[session_id] = session
+                        if self._patch_focused_session(session_id):
+                            self._spawn_detached(self._broadcast_focus())
+                        return
 
     async def _handle_clear(self, request: web.Request) -> web.Response:
         """Mark done agents as read without focusing; one session, or all when omitted."""
@@ -545,11 +585,14 @@ class AgentMonitorServer:
 
     async def _screen_text(self, session: iterm2.session.Session) -> str | None:
         """The session's visible screen as text, or None when the read fails."""
-        try:
-            screen = await session.async_get_screen_contents()
-            return "\n".join(screen.line(index).string for index in range(screen.number_of_lines))
-        except Exception:
-            return None
+        async with self._scan_rpc_gate:
+            try:
+                screen = await session.async_get_screen_contents()
+                return "\n".join(
+                    screen.line(index).string for index in range(screen.number_of_lines)
+                )
+            except Exception:
+                return None
 
     async def _screen_hint_state(
         self,
