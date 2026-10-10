@@ -776,6 +776,20 @@ class TestKimiScreenShowsActiveTurn:
         )
         assert not screen_shows_active_turn(AgentType.KIMI, screen)
 
+    def test_label_free_spinner_tip_above_the_composer(self) -> None:
+        screen = "\n".join(
+            [
+                "  ● Running a command · $ curl -s -X POST …",
+                '  ·· {"ok":true,"data":{}}',
+                "  🌑 · Tip: @: mention files",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+                "  Ask When Needed K2.8 Preview thinking: max",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.KIMI, screen)
+
     def test_ascii_ellipsis_variant(self) -> None:
         screen = "\n".join(
             [

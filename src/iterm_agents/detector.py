@@ -295,15 +295,17 @@ def kimi_screen_shows_active_turn(screen_text: str) -> bool:
     A live turn draws ``Working…`` (or Prompting/Orchestrating/Queued/
     Rate limited/Thinking, all ending in an ellipsis) above the composer
     box;
-    finished turns end with ``Completed.``, ``Failed.`` and friends. The
-    status line is redrawn in place, so it only exists on screen while the
-    turn is live. Anchoring it to the composer box underneath keeps
-    transcript echoes of the same label from matching.
+    while a tool runs the label is empty and the status line shows only
+    the spinner and its rotating `` · Tip:`` hint. Finished turns end
+    with ``Completed.``, ``Failed.`` and friends. The status line is
+    redrawn in place, so it only exists on screen while the turn is
+    live. Anchoring it to the composer box underneath keeps transcript
+    echoes of the same label from matching.
     """
     lines = screen_text.splitlines()
     for index in range(len(lines) - 1, max(len(lines) - 24, -1), -1):
         line = lines[index]
-        if not any(
+        if "· Tip:" not in line and not any(
             f"{label}…" in line or f"{label}..." in line
             for label in _KIMI_BUSY_LABELS
         ):
