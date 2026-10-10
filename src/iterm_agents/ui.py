@@ -478,13 +478,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         groups.get(key).push(s);
       }
 
-      // Sort groups: groups with running agents first
-      const sortedKeys = [...groups.keys()].sort((a, b) => {
-        const aRun = groups.get(a).some(s => statePriority(s.agent_state) <= 1) ? 0 : 1;
-        const bRun = groups.get(b).some(s => statePriority(s.agent_state) <= 1) ? 0 : 1;
-        if (aRun !== bRun) return aRun - bRun;
-        return a.localeCompare(b);
-      });
+      // Alphabetical group order: stable across status changes, so a cleared
+      // or finished agent never shifts a card out from under the cursor.
+      const sortedKeys = [...groups.keys()].sort((a, b) => a.localeCompare(b));
 
       let html = '';
       for (const key of sortedKeys) {
@@ -563,15 +559,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const d = document.createElement('div');
       d.textContent = str;
       return d.innerHTML;
-    }
-
-    function statePriority(state) {
-      switch (state) {
-        case 'running': return 0;
-        case 'awaiting_user': return 1;
-        case 'idle': return 2;
-        default: return 3;
-      }
     }
 
     function stateMeta(state) {
