@@ -11,11 +11,12 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from git import InvalidGitRepositoryError, Repo
+from git import Repo
 
 
 class AgentType(Enum):
@@ -35,7 +36,7 @@ class AgentState(Enum):
 class ProcessInfo:
     pid: int
     ppid: int
-    comm: str
+    command: str
 
 
 @dataclass
@@ -75,13 +76,8 @@ def _build_process_table() -> dict[int, ProcessInfo]:
             ppid = int(parts[1])
         except ValueError:
             continue
-        table[pid] = ProcessInfo(pid=pid, ppid=ppid, comm=parts[2].strip())
+        table[pid] = ProcessInfo(pid=pid, ppid=ppid, command=parts[2].strip())
     return table
-
-
-def _get_children(table: dict[int, ProcessInfo], pid: int) -> list[ProcessInfo]:
-    """Get all direct children of a process."""
-    return [p for p in table.values() if p.ppid == pid]
 
 
 def _get_descendants(table: dict[int, ProcessInfo], pid: int) -> list[ProcessInfo]:
@@ -90,10 +86,10 @@ def _get_descendants(table: dict[int, ProcessInfo], pid: int) -> list[ProcessInf
     for proc in table.values():
         children.setdefault(proc.ppid, []).append(proc)
     descendants: list[ProcessInfo] = []
-    queue = [pid]
+    queue: deque[int] = deque([pid])
     visited: set[int] = {pid}
     while queue:
-        current = queue.pop(0)
+        current = queue.popleft()
         for child in children.get(current, []):
             if child.pid not in visited:
                 visited.add(child.pid)
@@ -135,12 +131,12 @@ def _executable_name(command: str) -> str:
     return _comm_basename(_executable_token(command))
 
 
-def _is_claude_process(comm: str) -> bool:
-    return _executable_name(comm) == "claude"
+def _is_claude_process(command: str) -> bool:
+    return _executable_name(command) == "claude"
 
 
-def _is_codex_process(comm: str) -> bool:
-    return _executable_name(comm) == "codex"
+def _is_codex_process(command: str) -> bool:
+    return _executable_name(command) == "codex"
 
 
 def _is_cursor_agent(command: str) -> bool:
@@ -160,30 +156,33 @@ def _is_cursor_agent(command: str) -> bool:
     return name in {"node", "agent", "cursor-agent"}
 
 
+# The Kimi Code CLI sets its process name to `kimi-code`. The desktop app is
+# `Kimi` and the computer-use helper is `kimi-cu`; neither is this CLI.
+_EXECUTABLE_AGENT_TYPES = {
+    "claude": AgentType.CLAUDE,
+    "codex": AgentType.CODEX,
+    "devin": AgentType.DEVIN,
+    "kimi": AgentType.KIMI,
+    "kimi-code": AgentType.KIMI,
+}
+
+
 def _classify(command: str) -> AgentType | None:
-    name = _executable_name(command)
-    if name == "claude":
-        return AgentType.CLAUDE
-    if name == "codex":
-        return AgentType.CODEX
-    if name == "devin":
-        return AgentType.DEVIN
-    # The Kimi Code CLI sets its process name to `kimi-code`. The desktop app
-    # is `Kimi` and the computer-use helper is `kimi-cu`; neither is this CLI.
-    if name in {"kimi", "kimi-code"}:
-        return AgentType.KIMI
+    agent_type = _EXECUTABLE_AGENT_TYPES.get(_executable_name(command))
+    if agent_type is not None:
+        return agent_type
     if _is_cursor_agent(command):
         return AgentType.CURSOR
     return None
 
 
-def _is_agent_process(comm: str) -> bool:
-    return _classify(comm) is not None
+def _is_agent_process(command: str) -> bool:
+    return _classify(command) is not None
 
 
 def _has_busy_child(table: dict[int, ProcessInfo], pid: int) -> bool:
     for descendant in _get_descendants(table, pid):
-        if _executable_name(descendant.comm) in _BUSY_CHILD_NAMES:
+        if _executable_name(descendant.command) in _BUSY_CHILD_NAMES:
             return True
     return False
 
@@ -191,7 +190,7 @@ def _has_busy_child(table: dict[int, ProcessInfo], pid: int) -> bool:
 def _detect_claude_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
     """Claude Code spawns caffeinate when running a turn."""
     for descendant in _get_descendants(table, pid):
-        if _executable_name(descendant.comm) == "caffeinate":
+        if _executable_name(descendant.command) == "caffeinate":
             return AgentState.RUNNING
     return AgentState.IDLE
 
@@ -240,7 +239,7 @@ def _detect_codex_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
     """
     descendants = _get_descendants(table, pid)
     for descendant in descendants:
-        name = _executable_name(descendant.comm)
+        name = _executable_name(descendant.command)
         if name in ("sandbox-exec", "bwrap", "codex-linux-sandbox"):
             return AgentState.RUNNING
     return AgentState.IDLE
@@ -294,6 +293,10 @@ _KIMI_BUSY_LABELS = (
     "Thinking",
 )
 
+_KIMI_BUSY_NEEDLES = tuple(
+    f"{label}{suffix}" for label in _KIMI_BUSY_LABELS for suffix in ("…", "...")
+)
+
 
 def kimi_screen_shows_active_turn(screen_text: str) -> bool:
     """True while Kimi's status line shows an in-progress label.
@@ -312,8 +315,7 @@ def kimi_screen_shows_active_turn(screen_text: str) -> bool:
     for index in range(len(lines) - 1, max(len(lines) - 24, -1), -1):
         line = lines[index]
         if "· Tip:" not in line and not any(
-            f"{label}…" in line or f"{label}..." in line
-            for label in _KIMI_BUSY_LABELS
+            needle in line for needle in _KIMI_BUSY_NEEDLES
         ):
             continue
         for lookahead in range(index + 1, min(index + 16, len(lines))):
@@ -423,7 +425,7 @@ def _has_agent_ancestor(table: dict[int, ProcessInfo], pid: int) -> bool:
         parent = table.get(current)
         if parent is None:
             break
-        if _classify(parent.comm) is not None:
+        if _classify(parent.command) is not None:
             return True
         current = parent.ppid
     return False
@@ -443,7 +445,7 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
     codex_active_pids: set[int] | None = None
 
     for proc in table.values():
-        agent_type = _classify(proc.comm)
+        agent_type = _classify(proc.command)
         if agent_type is None or _has_agent_ancestor(table, proc.pid):
             continue
 
@@ -495,7 +497,7 @@ def get_git_info(path: str) -> GitInfo:
         return empty
     try:
         repo = Repo(path, search_parent_directories=True)
-    except (InvalidGitRepositoryError, Exception):
+    except Exception:
         return empty
 
     try:

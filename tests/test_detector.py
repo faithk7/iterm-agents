@@ -16,7 +16,6 @@ from iterm_agents.detector import (
     _detect_claude_state,
     _detect_codex_state,
     _find_ancestor_pid,
-    _get_children,
     _get_codex_active_pids,
     _get_descendants,
     _is_agent_process,
@@ -31,7 +30,10 @@ from iterm_agents.detector import (
 
 
 def _make_table(procs: list[tuple[int, int, str]]) -> dict[int, ProcessInfo]:
-    return {pid: ProcessInfo(pid=pid, ppid=ppid, comm=comm) for pid, ppid, comm in procs}
+    return {
+        pid: ProcessInfo(pid=pid, ppid=ppid, command=command)
+        for pid, ppid, command in procs
+    }
 
 
 class TestCommBasename:
@@ -69,26 +71,6 @@ class TestIsAgentProcess:
         assert _is_agent_process("claude")
         assert _is_agent_process("codex")
         assert not _is_agent_process("vim")
-
-
-class TestGetChildren:
-    def test_direct_children(self) -> None:
-        table = _make_table(
-            [
-                (1, 0, "init"),
-                (10, 1, "bash"),
-                (20, 1, "zsh"),
-                (30, 10, "claude"),
-            ]
-        )
-        children = _get_children(table, 1)
-        pids = {c.pid for c in children}
-        assert pids == {10, 20}
-
-    def test_no_children(self) -> None:
-        table = _make_table([(10, 1, "bash")])
-        children = _get_children(table, 10)
-        assert children == []
 
 
 class TestDescendants:

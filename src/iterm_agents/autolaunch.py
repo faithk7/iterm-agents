@@ -138,11 +138,8 @@ def install_autolaunch(
 
 def _detect_project_root() -> Path | None:
     module_path = Path(__file__).resolve()
-    try:
-        src_dir = module_path.parent.parent
-        project_root = src_dir.parent
-    except IndexError:
-        return None
+    src_dir = module_path.parent.parent
+    project_root = src_dir.parent
 
     expected_main = project_root / "src/iterm_agents/__main__.py"
     pyproject = project_root / "pyproject.toml"

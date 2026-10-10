@@ -35,6 +35,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 0
 
 _SHOW_TOOLBELT_ID = iterm2.mainmenu.MainMenu.Toolbelt.SHOW_TOOLBELT.value.identifier
+_HOME_DIR = os.path.expanduser("~")
 
 
 def _resolve_bound_port(addresses: list[object]) -> int:
@@ -50,9 +51,7 @@ def _resolve_bound_port(addresses: list[object]) -> int:
     return ports.pop()
 
 
-async def _session_variable(
-    session: iterm2.session.Session, name: str
-) -> object:
+async def _session_variable(session: iterm2.session.Session, name: str) -> object:
     try:
         return await session.async_get_variable(name)
     except Exception:
@@ -78,6 +77,7 @@ class AgentMonitorServer:
         self._scan_cache: tuple[float, list[dict[str, str | int]]] = (0.0, [])
         self._toolbelt_ready_windows: set[str] = set()
         self._git_cache: dict[str, tuple[float, GitInfo]] = {}
+        self._keystroke_task: asyncio.Task[None] | None = None
 
     @property
     def url(self) -> str:
@@ -106,7 +106,7 @@ class AgentMonitorServer:
         )
 
         self._toolbelt_ready_windows.update(await self._ensure_toolbelts_visible(None))
-        self._keystroke_task = asyncio.ensure_future(self._monitor_keystroke())
+        self._keystroke_task = asyncio.create_task(self._monitor_keystroke())
 
     async def _ensure_toolbelt_visible(self) -> None:
         """Show the Toolbelt in the key window if it's not already visible.
@@ -329,19 +329,32 @@ class AgentMonitorServer:
             if detected.session_pid is not None:
                 agent_by_session_pid[detected.session_pid] = detected
 
-        sessions_info = list(
-            await asyncio.gather(
-                *(
-                    self._session_row(
-                        pid,
-                        session,
-                        session_paths[pid],
-                        agent_by_session_pid.get(pid),
-                    )
-                    for pid, session in session_map.items()
+        sessions_info = await asyncio.gather(
+            *(
+                self._session_row(
+                    pid,
+                    session,
+                    session_paths[pid],
+                    agent_by_session_pid.get(pid),
                 )
+                for pid, session in session_map.items()
             )
         )
+
+        # Drop tracking state for sessions that closed and expired cache
+        # entries; both dicts would otherwise grow for the process lifetime.
+        live_session_ids = {session.session_id for session in session_map.values()}
+        self._cursor_footer = {
+            session_id: entry
+            for session_id, entry in self._cursor_footer.items()
+            if session_id in live_session_ids
+        }
+        now = time.monotonic()
+        self._git_cache = {
+            path: entry
+            for path, entry in self._git_cache.items()
+            if now - entry[0] < self._GIT_CACHE_TTL
+        }
 
         # Sort: running first, then completion-waiting, idle, then non-agents
         state_priority = {"running": 0, "awaiting_user": 1, "idle": 2}
@@ -383,14 +396,13 @@ class AgentMonitorServer:
                     session, agent.agent_type, agent_state
                 )
 
-        home = os.path.expanduser("~")
         return {
             "id": session.session_id,
             "name": session.name or "",
-            "path": path.replace(home, "~") if path else "",
+            "path": path.replace(_HOME_DIR, "~") if path else "",
             "repo": git.repo if git else "",
             "branch": git.branch if git else "",
-            "root_repo": git.root_repo.replace(home, "~") if git else "",
+            "root_repo": git.root_repo.replace(_HOME_DIR, "~") if git else "",
             "agent_type": agent.agent_type.value if agent else "",
             "agent_state": agent_state,
             "pid": pid,
