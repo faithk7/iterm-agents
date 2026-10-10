@@ -46,7 +46,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .search-box:focus { border-color: #569cd6; }
   .search-box::placeholder { color: #666; }
 
-  .repo-group { margin-bottom: 10px; }
+  /* Hand is scoped to card groups: a stale hit-test after click resolves to
+     the group, keeping the pointer a hand over cards only, not page margins. */
+  .repo-group { margin-bottom: 10px; cursor: pointer; }
   .repo-header {
     position: sticky;
     top: 0;
@@ -80,7 +82,20 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     outline: none;
   }
   .agent:hover, .agent.focused { background: #383838; }
+  .agent.cursor-refresh, .agent.cursor-refresh * { cursor: grab; }
   .agent.focused { outline: 1px solid #569cd6; }
+  /* The session shown in a window's current tab gets a bar just left of the
+     card, so it stays visible under the state's border color. */
+  .agent.current::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 4px;
+    bottom: 4px;
+    width: 3px;
+    border-radius: 2px;
+    background: #569cd6;
+  }
   .agent.running { border-left-color: #d7ba7d; }
   .agent.awaiting-user { border-left-color: #4ec9b0; background: #1c332a; }
   .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: #22402f; }
@@ -370,7 +385,28 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       try {
         await fetch('/api/clear?session=' + encodeURIComponent(sessionId));
       } catch(e) {}
-      await loadSessions(true);
+      acknowledgeCard(sessionId);
+    }
+
+    // Mirror renderGroup's done→idle output exactly — keeps markRendered()
+    // truthful without a DOM swap.
+    function markCardIdle(card) {
+      card.classList.remove('awaiting-user');
+      card.classList.add('idle');
+      const status = card.querySelector('.status');
+      if (status) status.innerHTML = '&#9675; idle';
+      const hint = card.querySelector('.action-hint');
+      if (hint) hint.remove();
+    }
+
+    function acknowledgeCard(sessionId) {
+      const s = allSessions.find(x => x.id === sessionId);
+      if (!s || s.agent_state !== 'awaiting_user') return;
+      s.agent_state = 'idle';
+      s.awaiting_user = false;
+      const card = document.querySelector(`.agent[data-session="${sessionId}"]`);
+      if (card) markCardIdle(card);
+      markRendered();
     }
 
     function openLabelEditor(sessionId) {
@@ -447,27 +483,27 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       }
     }
 
-    function filterSessions(force) {
+    function filteredSessions() {
       const q = document.getElementById('search').value.toLowerCase();
-      const filtered = q
+      return q
         ? allSessions.filter(s =>
             [s.name, s.repo, s.branch, s.path, s.agent_type, s.root_repo].some(
               v => v && v.toLowerCase().includes(q)
             ))
         : allSessions;
-      focusedIndex = -1;
-      renderSessions(filtered, force);
     }
 
-    function renderSessions(sessions, force) {
-      const container = document.getElementById('sessions');
-      if (sessions.length === 0) {
-        container.innerHTML = '<div class="no-results">No sessions found</div>';
-        document.getElementById('count').textContent = '';
-        document.getElementById('clear-all').disabled = true;
-        return;
-      }
+    function filterSessions(force) {
+      focusedIndex = -1;
+      renderSessions(filteredSessions(), force);
+    }
 
+    // The last HTML written. Identical renders skip the innerHTML swap —
+    // replacing the node under the cursor leaves WebKit showing a stale
+    // arrow until the next mouse event.
+    let lastRenderedHtml = '';
+
+    function buildHtml(sessions) {
       // Group by root_repo
       const groups = new Map();
       const noRepo = [];
@@ -491,12 +527,35 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       if (noRepo.length > 0) {
         html += renderGroup('(no repo)', '', noRepo);
       }
+      return html;
+    }
+
+    // After an optimistic DOM patch the DOM already matches a fresh render;
+    // claim it so the next identical render skips the swap (see above).
+    function markRendered() {
+      lastRenderedHtml = buildHtml(filteredSessions());
+    }
+
+    function renderSessions(sessions, force) {
+      const container = document.getElementById('sessions');
+      if (sessions.length === 0) {
+        container.innerHTML = '<div class="no-results">No sessions found</div>';
+        lastRenderedHtml = '';
+        document.getElementById('count').textContent = '';
+        document.getElementById('clear-all').disabled = true;
+        return;
+      }
+
+      const html = buildHtml(sessions);
 
       // pointerDown suppresses stray interval writes mid-click; renders a
       // click handler asked for are safe — the click already dispatched.
       // An open context menu or label editor is also left untouched.
       if (force || (!pointerDown && !labelEditorOpen && !ctxMenu)) {
-        container.innerHTML = html;
+        if (html !== lastRenderedHtml) {
+          container.innerHTML = html;
+          lastRenderedHtml = html;
+        }
       }
 
       const running = sessions.filter(s => s.agent_state === 'running').length;
@@ -530,8 +589,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         const actionHint = s.awaiting_user
           ? '<div class="action-hint">Click to clear</div>'
           : '';
-        return `<div class="agent ${meta.cls}" data-session="${s.id}"
-                     onclick="focusSession('${s.id}')">
+        return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}"
+                     data-session="${s.id}" onclick="focusSession('${s.id}')">
           <div class="agent-top">
             <span class="status">${meta.icon} ${meta.label}</span>
             ${typeBadge}
@@ -584,16 +643,38 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     async function focusSession(sessionId) {
       try {
         await fetch('/api/focus?session=' + encodeURIComponent(sessionId));
-        await loadSessions(true);
       } catch(e) {}
+      // Patch the card in place — the marker arrives via SSE and the poll
+      // confirms the rest; a forced rewrite churns the node under the cursor.
+      acknowledgeCard(sessionId);
+      refreshCardCursor();
+    }
+
+    // Changing the cursor across frames makes WebKit refresh it after the pane takes focus.
+    function refreshCardCursor() {
+      if (ctxMenu || labelEditorOpen) return;
+      const card = document.querySelector('.agent:hover');
+      if (!card) return;
+      card.classList.add('cursor-refresh');
+      requestAnimationFrame(() => requestAnimationFrame(() =>
+        card.classList.remove('cursor-refresh')));
     }
 
     loadSessions();
     setInterval(loadSessions, 1000);
 
-    // SSE: listen for focus events from the Python side (Cmd+Shift+M)
+    // SSE: iTerm2 focus changes refresh the marker; Cmd+Shift+M focuses search.
     function connectSSE() {
       const es = new EventSource('/api/events');
+      // The event carries the focused session ids — toggle the marker in
+      // place; a refetch would add a needless round trip to a fast path.
+      es.addEventListener('focus-changed', (e) => {
+        const ids = new Set(JSON.parse(e.data).focused || []);
+        allSessions.forEach(s => { s.focused = ids.has(s.id); });
+        document.querySelectorAll('.agent').forEach(el =>
+          el.classList.toggle('current', ids.has(el.dataset.session)));
+        markRendered();
+      });
       es.addEventListener('focus-search', () => {
         const search = document.getElementById('search');
         search.focus();

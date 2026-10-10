@@ -61,8 +61,11 @@ class _ScanSession:
 
 
 class _ScanTab:
-    def __init__(self, sessions: list[_ScanSession]) -> None:
+    def __init__(
+        self, sessions: list[_ScanSession], active_session_id: str | None = None
+    ) -> None:
         self.sessions = sessions
+        self.active_session_id = active_session_id
 
 
 class _ToolbeltWindow:
@@ -71,6 +74,10 @@ class _ToolbeltWindow:
         self._app = app
         self._becomes_key = becomes_key
         self.tabs: list[_ScanTab] = []
+
+    @property
+    def current_tab(self) -> _ScanTab | None:
+        return self.tabs[0] if self.tabs else None
 
     async def async_activate(self) -> None:
         self._app.activations.append(self.window_id)
@@ -337,3 +344,35 @@ class TestAgentMonitorServer:
         app.terminal_windows.append(window)
         await server._scan_sessions()
         assert calls == [{"w1"}, {"w2"}]
+
+    async def test_scan_marks_each_windows_active_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _App({"w1": False})
+        app.terminal_windows[0].tabs = [
+            _ScanTab([_ScanSession(11), _ScanSession(22)], active_session_id="s-22")
+        ]
+        _patch_iterm(monkeypatch, app)
+        monkeypatch.setattr("iterm_agents.server.detect_agents", lambda _pids: [])
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+
+        rows = await server._scan_sessions()
+
+        focused = {row["id"]: row["focused"] for row in rows}
+        assert focused == {"s-11": False, "s-22": True}
+
+    def test_patch_focused_session_moves_the_marker(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._sessions_by_id = {"s-1": object(), "s-2": object()}  # type: ignore[dict-item]
+        server._focused_ids = {"s-1"}
+        server._scan_cache = (1.0, [{"id": "s-1"}, {"id": "s-2"}])
+
+        assert server._patch_focused_session("s-2")
+
+        assert server._focused_ids == {"s-2"}
+        assert [row["focused"] for row in server._scan_cache[1]] == [False, True]
+
+    def test_patch_focused_session_unknown_id_defers(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+
+        assert not server._patch_focused_session("ghost")

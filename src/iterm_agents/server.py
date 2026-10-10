@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import time
 import weakref
+from collections.abc import Coroutine
+from typing import Any
 
 import iterm2
 import iterm2.app
 import iterm2.connection
+import iterm2.focus
 import iterm2.keyboard
 import iterm2.mainmenu
 import iterm2.session
@@ -60,6 +64,14 @@ async def _session_variable(session: iterm2.session.Session, name: str) -> objec
         return None
 
 
+def _focused_session_ids(iterm2_app: iterm2.app.App) -> set[str]:
+    """The active session of the current window's current tab, if any."""
+    window = iterm2_app.current_window
+    tab = window.current_tab if window is not None else None
+    session_id = tab.active_session_id if tab is not None else None
+    return {session_id} if session_id else set()
+
+
 class AgentMonitorServer:
     """Manages the aiohttp server and iTerm2 Toolbelt integration."""
 
@@ -81,6 +93,10 @@ class AgentMonitorServer:
         self._toolbelt_ready_windows: set[str] = set()
         self._git_cache: dict[str, tuple[float, GitInfo]] = {}
         self._keystroke_task: asyncio.Task[None] | None = None
+        self._focus_task: asyncio.Task[None] | None = None
+        self._focused_ids: set[str] = set()
+        self._sessions_by_id: dict[str, iterm2.session.Session] = {}
+        self._detached_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def url(self) -> str:
@@ -113,6 +129,7 @@ class AgentMonitorServer:
 
         self._toolbelt_ready_windows.update(await self._ensure_toolbelts_visible(None))
         self._keystroke_task = asyncio.create_task(self._monitor_keystroke())
+        self._focus_task = asyncio.create_task(self._monitor_focus_changes())
 
     async def _ensure_toolbelt_visible(self) -> None:
         """Show the Toolbelt in the key window if it's not already visible.
@@ -233,12 +250,66 @@ class AgentMonitorServer:
         except Exception as e:
             print(f"iterm-agents: keystroke monitor error: {e}")
 
-    async def _broadcast_sse(self, event: str) -> None:
+    async def _monitor_focus_changes(self) -> None:
+        """Push focus-marker updates; RPC-heavy paths run detached so neither
+        the monitor loop nor the pane-switch flow ever waits on them."""
+        try:
+            async with iterm2.focus.FocusMonitor(self.connection) as monitor:
+                while True:
+                    update = await monitor.async_get_next_update()
+                    if update.active_session_changed:
+                        if self._patch_focused_session(update.active_session_changed.session_id):
+                            await self._broadcast_focus()
+                        else:
+                            self._spawn_detached(self._refresh_focused_rows())
+                    elif update.selected_tab_changed or update.window_changed:
+                        self._spawn_detached(self._refresh_focused_rows())
+        except Exception as e:
+            print(f"iterm-agents: focus monitor error: {e}")
+
+    def _spawn_detached(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run a coroutine detached, keeping a reference until it completes."""
+        task = asyncio.create_task(coro)
+        self._detached_tasks.add(task)
+        task.add_done_callback(self._detached_tasks.discard)
+
+    def _patch_focused_session(self, session_id: str) -> bool:
+        """Move the marker to a newly active session without any RPC.
+
+        Uses the session map from the last scan; returns False for a session
+        the map does not know so the caller can rescan instead.
+        """
+        if session_id not in self._sessions_by_id:
+            return False
+        self._focused_ids = {session_id}
+        self._apply_focused_cache()
+        return True
+
+    async def _refresh_focused_rows(self) -> None:
+        """Recompute focused ids from a fresh snapshot and push them out."""
+        iterm2_app = await iterm2.app.async_get_app(self.connection)
+        if iterm2_app is None:
+            return
+        self._focused_ids = _focused_session_ids(iterm2_app)
+        self._apply_focused_cache()
+        await self._broadcast_focus()
+
+    def _apply_focused_cache(self) -> None:
+        """Update the focused flags on the cached scan in place."""
+        for row in self._scan_cache[1]:
+            row["focused"] = row["id"] in self._focused_ids
+
+    async def _broadcast_focus(self) -> None:
+        """Push the current focused-id set to every WebView."""
+        await self._broadcast_sse("focus-changed", {"focused": sorted(self._focused_ids)})
+
+    async def _broadcast_sse(self, event: str, data: object = None) -> None:
         """Send an SSE event to all connected WebView clients."""
+        payload = json.dumps({} if data is None else data)
         dead: list[web.StreamResponse] = []
         for client in self._sse_clients:
             try:
-                await client.write(f"event: {event}\ndata: {{}}\n\n".encode())
+                await client.write(f"event: {event}\ndata: {payload}\n\n".encode())
             except Exception:
                 dead.append(client)
         for d in dead:
@@ -304,13 +375,15 @@ class AgentMonitorServer:
 
         # Collect session PIDs for agent-session mapping. Fetching pid and
         # path per session serially costs two RPC round trips per session;
-        # gathering sends them all at once.
+        # gathering sends them all at once. The id map lets focus clicks and
+        # focus-change updates skip a full app snapshot entirely.
         all_sessions = [
             session
             for window in iterm2_app.terminal_windows
             for tab in window.tabs
             for session in tab.sessions
         ]
+        self._sessions_by_id = {s.session_id: s for s in all_sessions}
         pids, paths = await asyncio.gather(
             asyncio.gather(*(_session_variable(s, "pid") for s in all_sessions)),
             asyncio.gather(*(_session_variable(s, "path") for s in all_sessions)),
@@ -331,6 +404,11 @@ class AgentMonitorServer:
             if detected.session_pid is not None:
                 agent_by_session_pid[detected.session_pid] = detected
 
+        # Each window's current tab marks its active session so the UI can
+        # flag the focused pane; these are cached properties, not RPCs.
+        focused_ids = _focused_session_ids(iterm2_app)
+        self._focused_ids = focused_ids
+
         sessions_info = await asyncio.gather(
             *(
                 self._session_row(
@@ -338,6 +416,7 @@ class AgentMonitorServer:
                     session,
                     session_paths[pid],
                     agent_by_session_pid.get(pid),
+                    session.session_id in focused_ids,
                 )
                 for pid, session in session_map.items()
             )
@@ -358,15 +437,8 @@ class AgentMonitorServer:
             if now - entry[0] < self._GIT_CACHE_TTL
         }
 
-        # Sort: running first, then completion-waiting, idle, then non-agents
-        state_priority = {"running": 0, "awaiting_user": 1, "idle": 2}
-        sessions_info.sort(
-            key=lambda s: (
-                state_priority.get(str(s["agent_state"]), 3),
-                s["name"],
-            )
-        )
-
+        # Rows keep pane order (window, tab, session) so a status change
+        # never moves a card out from under the cursor.
         return sessions_info
 
     _GIT_CACHE_TTL = 5.0
@@ -387,6 +459,7 @@ class AgentMonitorServer:
         session: iterm2.session.Session,
         path: str,
         agent: AgentInfo | None,
+        focused: bool,
     ) -> dict[str, str | int]:
         """Build one session's API row, upgrading idle agents via the screen."""
         git = await self._git_for(path) if path else None
@@ -407,6 +480,7 @@ class AgentMonitorServer:
             "agent_type": agent.agent_type.value if agent else "",
             "agent_state": agent_state,
             "pid": pid,
+            "focused": focused,
         }
 
     async def _handle_focus(self, request: web.Request) -> web.Response:
@@ -415,6 +489,19 @@ class AgentMonitorServer:
         if not session_id:
             return web.Response(text="no session id", status=400)
         self._session_state.acknowledge(session_id)
+
+        # Fast path: the session object from the last scan activates in a
+        # single RPC — a fresh app snapshot costs hundreds of ms.
+        session = self._sessions_by_id.get(session_id)
+        if session is not None:
+            try:
+                await session.async_activate()
+            except Exception:
+                pass  # closed between scan and click; fall through to lookup
+            else:
+                if self._patch_focused_session(session_id):
+                    await self._broadcast_focus()
+                return web.Response(text="ok")
 
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
