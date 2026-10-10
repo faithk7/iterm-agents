@@ -25,6 +25,16 @@ const script = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 let writes = 0;
 let escapeElements = 0;
 let cards = [];
+const scrolls = [];
+const cardPositions = {one: 1650, two: 2650};
+const viewport = {
+  innerHeight: 900, scrollY: 600, addEventListener() {},
+  scrollTo(options) {
+    const session = cards.find(card => card.classList.contains('current')).dataset.session;
+    scrolls.push({session, options});
+    this.scrollY = options.top;
+  },
+};
 const timeouts = [];
 const listeners = {};
 const elements = new Map();
@@ -32,7 +42,28 @@ function element(id) {
   if (!elements.has(id)) elements.set(id, {
     value: '', textContent: '', disabled: false,
     focus() {}, addEventListener() {},
-    set innerHTML(html) { if (id === 'sessions') writes++; this.html = html; },
+    set innerHTML(html) {
+      if (id === 'sessions') {
+        writes++;
+        cards = [...html.matchAll(/class="agent ([^"]*)"\s+data-session="([^"]*)"/g)]
+          .map(([, cls, session]) => {
+            const classes = new Set(cls.trim().split(/\s+/));
+            return {
+              dataset: {session},
+              classList: {
+                contains: c => classes.has(c),
+                toggle(c, enabled) { if (enabled) classes.add(c); else classes.delete(c); },
+                add: c => classes.add(c), remove: c => classes.delete(c),
+              },
+              getBoundingClientRect: () => ({
+                top: cardPositions[session] - viewport.scrollY,
+                bottom: cardPositions[session] - viewport.scrollY + 60,
+              }),
+            };
+          });
+      }
+      this.html = html;
+    },
     get innerHTML() { return this.html || ''; },
   });
   return elements.get(id);
@@ -43,13 +74,14 @@ const context = vm.createContext({
     getElementById: element,
     addEventListener() {},
     querySelectorAll: () => cards,
-    querySelector: () => cards[0],
+    querySelector: selector => selector === '.agent.current'
+      ? cards.find(card => card.classList.contains('current')) : cards[0],
     createElement: () => {
       escapeElements++;
       return { set textContent(s) { this.innerHTML = s; } };
     },
   },
-  window: { addEventListener() {} },
+  window: viewport,
   fetch: url => url.startsWith('/api/focus')
     ? Promise.resolve({ ok: true }) : new Promise(() => {}),
   setInterval() {},
@@ -71,11 +103,16 @@ let hintRemoved = false;
 cards = [{
   dataset: { session: 'one' },
   classList: {
+    contains: c => classes.has(c),
     toggle(c, enabled) { if (enabled) classes.add(c); else classes.delete(c); },
     add: c => classes.add(c), remove: c => classes.delete(c),
   },
   querySelector: selector => selector === '.status'
     ? status : { remove() { hintRemoved = true; } },
+  getBoundingClientRect: () => ({
+    top: cardPositions.one - viewport.scrollY,
+    bottom: cardPositions.one - viewport.scrollY + 60,
+  }),
 }];
 const originalCard = cards[0];
 const initialWrites = writes;
@@ -90,6 +127,9 @@ for (const focused of [['one'], ['two'], ['one']]) {
   assert.equal(writes, initialWrites, 'focus must not replace the hovered card');
   assert.equal(classes.has('current'), focused.includes('one'));
 }
+assert.equal(scrolls.length, 1, 'refocusing an already visible card must not scroll');
+assert.equal(scrolls[0].options.top, 1470);
+assert.equal(cardPositions.one - viewport.scrollY, 180, 'card top must land one-fifth down');
 vm.runInContext("acknowledgeCard('one'); filterSessions()", context);
 assert.equal(writes, initialWrites, 'clearing done must preserve the card');
 assert.equal(cards[0], originalCard);
@@ -140,6 +180,59 @@ assert.ok(element('count').textContent.includes('0 done'));
   assert.equal(writes, emptyWrites, 'unchanged empty results must preserve the DOM');
   assert.equal(element('count').textContent, '');
   assert.ok(element('clear-all').disabled);
+
+  element('search').value = '';
+  vm.runInContext(`
+    allSessions[0].focused = false; allSessions[1].focused = true; filterSessions();
+  `, context);
+  assert.equal(scrolls.at(-1).session, 'two', 'polls must reveal focus without an SSE event');
+  let scrollCount = scrolls.length;
+  vm.runInContext('filterSessions(); filterSessions()', context);
+  assert.equal(scrolls.length, scrollCount, 'unchanged polls must allow manual scrolling');
+
+  vm.runInContext("toggleGroup('')", context);
+  assert.ok(!element('sessions').innerHTML.includes('class="agent '));
+  listeners['focus-changed']({data: JSON.stringify({focused: ['one']})});
+  assert.equal(scrolls.at(-1).session, 'one');
+  assert.ok(element('sessions').innerHTML.includes('class="agent '), 'focus opens its group');
+
+  element('search').value = 'hidden';
+  vm.runInContext('filterSessions()', context);
+  listeners['focus-changed']({data: JSON.stringify({focused: ['two']})});
+  scrollCount = scrolls.length;
+  listeners['focus-changed']({data: JSON.stringify({focused: ['one']})});
+  assert.equal(element('search').value, 'hidden', 'focus must preserve the search filter');
+  assert.equal(scrolls.length, scrollCount, 'excluded cards cannot be scrolled into view');
+  element('search').value = '';
+  vm.runInContext('filterSessions()', context);
+  assert.equal(scrolls.at(-1).session, 'one', 'clearing search must reveal pending focus');
+
+  for (const guard of ['pointerDown', 'labelEditorOpen', 'ctxMenu']) {
+    listeners['focus-changed']({data: JSON.stringify({focused: ['one']})});
+    vm.runInContext(`${guard} = true`, context);
+    scrollCount = scrolls.length;
+    listeners['focus-changed']({data: JSON.stringify({focused: ['two']})});
+    assert.equal(scrolls.length, scrollCount, 'focus must not jump during an interaction');
+    vm.runInContext(`${guard} = false; filterSessions()`, context);
+    assert.equal(scrolls.length, scrollCount + 1);
+    assert.equal(scrolls.at(-1).session, 'two');
+  }
+  const visibilityCases = [[0, false], [180, false], [840, false], [-1, true], [841, true]];
+  for (const [top, mustScroll] of visibilityCases) {
+    listeners['focus-changed']({data: JSON.stringify({focused: []})});
+    viewport.scrollY = 600;
+    cardPositions.one = viewport.scrollY + top;
+    scrollCount = scrolls.length;
+    listeners['focus-changed']({data: JSON.stringify({focused: ['one']})});
+    assert.equal(scrolls.length, scrollCount + Number(mustScroll), 'scroll only clipped cards');
+    if (mustScroll) assert.equal(cardPositions.one - viewport.scrollY, 180);
+    else assert.equal(viewport.scrollY, 600, 'keep the existing view for visible cards');
+  }
+  listeners['focus-changed']({data: JSON.stringify({focused: []})});
+  cardPositions.one = 100;
+  viewport.scrollY = 400;
+  listeners['focus-changed']({data: JSON.stringify({focused: ['one']})});
+  assert.equal(scrolls.at(-1).options.top, 0, 'scrolling must clamp at the start of the list');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """,
         ],

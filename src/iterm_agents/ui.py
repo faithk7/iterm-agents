@@ -504,6 +504,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // arrow until the next mouse event.
     let lastRenderedHtml = '';
     let lastRenderedInput = '';
+    let lastFocusedSessionId = '';
+    let pendingFocusReveal = '';
 
     function renderKey(sessions) {
       return JSON.stringify([sessions, [...collapsedRepos].sort()]);
@@ -546,10 +548,17 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     function renderSessions(sessions, force) {
       const container = document.getElementById('sessions');
+      const focusedId = allSessions.find(s => s.focused)?.id || '';
+      if (focusedId !== lastFocusedSessionId) {
+        lastFocusedSessionId = focusedId;
+        pendingFocusReveal = focusedId;
+      }
       // pointerDown suppresses stray interval writes mid-click; renders a
       // click handler asked for are safe — the click already dispatched.
       // An open context menu or label editor is also left untouched.
       if (force || (!pointerDown && !labelEditorOpen && !ctxMenu)) {
+        const reveal = sessions.find(s => s.id === pendingFocusReveal);
+        if (reveal) collapsedRepos.delete(reveal.root_repo || '');
         const key = renderKey(sessions);
         if (key !== lastRenderedInput) {
           const html = sessions.length ? buildHtml(sessions)
@@ -559,6 +568,18 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
             lastRenderedHtml = html;
           }
           lastRenderedInput = key;
+        }
+        if (reveal) {
+          const card = document.querySelector('.agent.current');
+          if (card) {
+            const rect = card.getBoundingClientRect();
+            if (rect.top < 0 || rect.bottom > window.innerHeight) {
+              window.scrollTo({
+                top: Math.max(0, window.scrollY + rect.top - window.innerHeight / 5),
+              });
+            }
+            pendingFocusReveal = '';
+          }
         }
       }
 
@@ -667,6 +688,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         document.querySelectorAll('.agent').forEach(el =>
           el.classList.toggle('current', ids.has(el.dataset.session)));
         markRendered();
+        renderSessions(filteredSessions());
       });
       es.addEventListener('focus-search', () => {
         const search = document.getElementById('search');
