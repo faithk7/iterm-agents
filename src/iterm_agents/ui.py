@@ -207,24 +207,25 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     // Auto-focus search input when the Toolbelt panel gets focus.
     // Use multiple strategies since embedded WebViews may not fire focus events.
-    let hadFocus = document.hasFocus();
-    window.addEventListener('focus', () => {
+    // Never steal focus from an open context menu or label editor.
+    function focusSearch() {
+      if (ctxMenu || labelEditorOpen) return;
       document.getElementById('search').focus({ preventScroll: true });
-    });
+    }
+    let hadFocus = document.hasFocus();
+    window.addEventListener('focus', focusSearch);
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) {
-        document.getElementById('search').focus({ preventScroll: true });
-      }
+      if (!document.hidden) focusSearch();
     });
     setInterval(() => {
       const hasFocus = document.hasFocus();
-      if (hasFocus && !hadFocus) {
-        document.getElementById('search').focus({ preventScroll: true });
-      }
+      if (hasFocus && !hadFocus) focusSearch();
       hadFocus = hasFocus;
     }, 200);
 
     document.addEventListener('keydown', (e) => {
+      // The context menu and label editor handle their own keys.
+      if (ctxMenu || labelEditorOpen) return;
       const items = getAgentElements();
       const search = document.getElementById('search');
 
@@ -344,7 +345,21 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
     }
 
-    document.addEventListener('click', closeCtxMenu);
+    // While a menu or the label editor is open, the first outside click is
+    // spent dismissing it — captured here so it can't also jump to a session,
+    // toggle a group, or hit a header button underneath.
+    document.addEventListener('click', (e) => {
+      if (ctxMenu) {
+        if (ctxMenu.contains(e.target)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeCtxMenu();
+      } else if (labelEditorOpen && !e.target.closest('.label-editor')) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeLabelEditor();
+      }
+    }, true);
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeCtxMenu();
     });
