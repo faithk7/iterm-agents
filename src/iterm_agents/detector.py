@@ -279,14 +279,22 @@ def codex_screen_shows_active_turn(screen_text: str) -> bool:
     return False
 
 
-_KIMI_BUSY_LABELS = ("Working", "Prompting", "Orchestrating", "Queued", "Rate limited")
+_KIMI_BUSY_LABELS = (
+    "Working",
+    "Prompting",
+    "Orchestrating",
+    "Queued",
+    "Rate limited",
+    "Thinking",
+)
 
 
 def kimi_screen_shows_active_turn(screen_text: str) -> bool:
     """True while Kimi's status line shows an in-progress label.
 
     A live turn draws ``Working…`` (or Prompting/Orchestrating/Queued/
-    Rate limited, all ending in an ellipsis) above the composer box;
+    Rate limited/Thinking, all ending in an ellipsis) above the composer
+    box;
     finished turns end with ``Completed.``, ``Failed.`` and friends. The
     status line is redrawn in place, so it only exists on screen while the
     turn is live. Anchoring it to the composer box underneath keeps

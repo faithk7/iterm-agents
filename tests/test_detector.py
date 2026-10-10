@@ -731,7 +731,13 @@ class TestKimiScreenShowsActiveTurn:
         assert screen_shows_active_turn(AgentType.KIMI, screen)
 
     def test_orchestrating_and_rate_limited_variants(self) -> None:
-        for label in ("Orchestrating", "Prompting", "Queued", "Rate limited"):
+        for label in (
+            "Orchestrating",
+            "Prompting",
+            "Queued",
+            "Rate limited",
+            "Thinking",
+        ):
             screen = "\n".join(
                 [
                     f"  🌖 {label}…  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -741,6 +747,34 @@ class TestKimiScreenShowsActiveTurn:
                 ]
             )
             assert screen_shows_active_turn(AgentType.KIMI, screen), label
+
+    def test_plan_mode_thinking_status_above_the_composer(self) -> None:
+        screen = "\n".join(
+            [
+                "  ✨ list the files in this directory",
+                "  ⠋ thinking…",
+                "    The user asked a simple question…",
+                "   ⠋ Thinking… · Tip: ask Kimi to schedule tasks",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+                "  plan  K2.8 Preview thinking: max",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.KIMI, screen)
+
+    def test_lowercase_thinking_transcript_is_not_running(self) -> None:
+        screen = "\n".join(
+            [
+                "  ⠋ thinking…",
+                "    The user asked a simple question…",
+                "  ╭────────────────────────────────────────────╮",
+                "  │ >                                          │",
+                "  ╰────────────────────────────────────────────╯",
+                "  plan  K2.8 Preview thinking: max",
+            ]
+        )
+        assert not screen_shows_active_turn(AgentType.KIMI, screen)
 
     def test_ascii_ellipsis_variant(self) -> None:
         screen = "\n".join(
