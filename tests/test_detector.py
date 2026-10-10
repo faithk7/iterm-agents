@@ -539,7 +539,7 @@ class TestScreenShowsActiveTurn:
         assert cursor_activity_signature(screen) is None
         assert not screen_shows_active_turn(AgentType.CURSOR, screen)
 
-    def test_signature_ignores_the_spinner_and_tracks_a_tool_timer(self) -> None:
+    def test_signature_tracks_the_spinner_and_a_tool_timer(self) -> None:
         first = "\n".join(
             [
                 "    import asyncio 2.6s in code/iterm-agents",
@@ -555,8 +555,11 @@ class TestScreenShowsActiveTurn:
         later = first.replace("2.6s", "7.6s")
         signature = cursor_activity_signature(first)
         assert signature is not None
-        assert cursor_activity_signature(spun) == signature
+        # The spinner ticks while the turn lives, so it counts as motion.
+        assert cursor_activity_signature(spun) != signature
         assert cursor_activity_signature(later) != signature
+        # A frame redrawn with the same spinner glyph is not motion.
+        assert cursor_activity_signature(first) == signature
 
     def test_frozen_footer_is_not_a_live_turn(self) -> None:
         signature = "Running 2.79k tokens"
@@ -652,6 +655,17 @@ class TestCodexScreenShowsActiveTurn:
                 "  \u203a Ask Codex to do anything",
                 "  GPT-6.1-Sol high · ~/repo · Thread title",
                 "  ? for shortcuts     ⚠ 1 warning · f2 to view",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.CODEX, screen)
+
+    def test_shortcuts_footer_anchors_composerless_variant(self) -> None:
+        screen = "\n".join(
+            [
+                "  • Working (8s • esc to interrupt)",
+                "  Ask Codex to do anything",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+                "  ← for agents · ? for shortcuts",
             ]
         )
         assert screen_shows_active_turn(AgentType.CODEX, screen)

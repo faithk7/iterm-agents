@@ -267,14 +267,17 @@ def codex_screen_shows_active_turn(screen_text: str) -> bool:
     A running turn draws ``Working (<elapsed> • esc to interrupt)`` on the
     line above the composer. The hint is redrawn in place, so it only exists
     on screen while the turn is live. Anchoring it to the composer prompt
-    below keeps transcript echoes of the same string from matching.
+    or the shortcuts footer below keeps transcript echoes of the same
+    string from matching; not every composer variant draws the same
+    prompt character.
     """
     lines = screen_text.splitlines()
     for index in range(len(lines) - 1, max(len(lines) - 13, -1), -1):
         if "esc to interrupt)" not in lines[index]:
             continue
-        for lookahead in range(index + 1, min(index + 5, len(lines))):
-            if lines[lookahead].lstrip().startswith("\u203a"):
+        for lookahead in range(index + 1, min(index + 9, len(lines))):
+            stripped = lines[lookahead].lstrip()
+            if stripped.startswith("\u203a") or "? for shortcuts" in stripped:
                 return True
     return False
 
@@ -342,9 +345,10 @@ def cursor_activity_signature(screen_text: str) -> str | None:
 
     The live signal is ``ctrl+c to stop`` inside the composer box. A
     ``Running N tokens`` line left above that box after the turn ends does
-    not count. The signature is the visible screen with the braille spinner
-    removed, so a timer or a new token count changes it and a stuck footer
-    does not.
+    not count. The signature is the visible screen with insignificant
+    spacing dropped. The animated spinner stays in it: during a quiet
+    thinking or reconnect stall it is the only thing still moving, and a
+    leftover footer frozen after the turn ends does not move at all.
     """
     footer = _cursor_footer_lines(screen_text)
     if not any("ctrl+c to stop" in line for line in footer):
@@ -353,13 +357,8 @@ def cursor_activity_signature(screen_text: str) -> str | None:
 
 
 def _normalize_cursor_screen(screen_text: str) -> str:
-    """Drop the animated spinner and insignificant spacing."""
-    kept = []
-    for char in screen_text:
-        if "\u2800" <= char <= "\u28ff":
-            continue
-        kept.append(char)
-    lines = (" ".join(line.split()) for line in "".join(kept).splitlines())
+    """Drop insignificant spacing."""
+    lines = (" ".join(line.split()) for line in screen_text.splitlines())
     return "\n".join(line for line in lines if line)
 
 
