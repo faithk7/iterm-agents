@@ -58,3 +58,7 @@ class SessionStateTracker:
             and self._last_agent_states[session_id] != "running"
         ):
             self._last_agent_states[session_id] = "idle"
+
+    def acknowledge_all(self) -> None:
+        """Clear every transient completion state at once."""
+        self._awaiting_user_sessions.clear()

@@ -45,6 +45,25 @@ class TestSessionStateTracker:
         assert session["agent_state"] == "idle"
         assert session["awaiting_user"] is False
 
+    def test_acknowledge_all_clears_every_done_session(self) -> None:
+        tracker = SessionStateTracker()
+
+        tracker.apply(
+            [_session("running", session_id="a"), _session("running", session_id="b")]
+        )
+        tracker.apply(
+            [_session("idle", session_id="a"), _session("idle", session_id="b")]
+        )
+        tracker.acknowledge_all()
+        a, b = tracker.apply(
+            [_session("idle", session_id="a"), _session("idle", session_id="b")]
+        )
+
+        assert a["agent_state"] == "idle"
+        assert b["agent_state"] == "idle"
+        assert a["awaiting_user"] is False
+        assert b["awaiting_user"] is False
+
     def test_new_run_clears_awaiting_user_immediately(self) -> None:
         tracker = SessionStateTracker()
 

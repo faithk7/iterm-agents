@@ -27,6 +27,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     border-radius: 3px; padding: 2px 6px; cursor: pointer; font-size: 11px;
   }
   .refresh-btn:hover { color: #d4d4d4; border-color: #888; }
+  .refresh-btn:disabled { opacity: 0.4; cursor: default; }
+  .refresh-btn:disabled:hover { color: #888; border-color: #555; }
   .search-box {
     width: 100%;
     padding: 5px 8px;
@@ -122,6 +124,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   <div class="header">
     <span class="title">Agents</span>
     <span>
+      <button class="refresh-btn" id="clear-all" title="Mark all done as read"
+              onclick="clearAllDone()">&#10003;</button>
       <button class="refresh-btn" title="Collapse all" onclick="toggleCollapseAll()">&#8847;</button>
       <button class="refresh-btn" onclick="loadSessions()">&#8635;</button>
     </span>
@@ -275,6 +279,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       if (sessions.length === 0) {
         container.innerHTML = '<div class="no-results">No sessions found</div>';
         document.getElementById('count').textContent = '';
+        document.getElementById('clear-all').disabled = true;
         return;
       }
 
@@ -314,6 +319,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
       const running = sessions.filter(s => s.agent_state === 'running').length;
       const awaiting = sessions.filter(s => s.agent_state === 'awaiting_user').length;
+      document.getElementById('clear-all').disabled = awaiting === 0;
       const withAgent = sessions.filter(s => s.agent_type).length;
       document.getElementById('count').textContent =
         `${running} running / ${awaiting} done / ` +
@@ -386,6 +392,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         default:
           return { cls: 'idle', icon: '&#9675;', label: state || 'no agent' };
       }
+    }
+
+    async function clearAllDone() {
+      try {
+        await fetch('/api/clear');
+        await loadSessions(true);
+      } catch(e) {}
     }
 
     async function focusSession(sessionId) {

@@ -77,6 +77,7 @@ class AgentMonitorServer:
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/api/sessions", self._handle_sessions)
         app.router.add_get("/api/focus", self._handle_focus)
+        app.router.add_get("/api/clear", self._handle_clear)
         app.router.add_get("/api/events", self._handle_sse)
 
         runner = web.AppRunner(app)
@@ -375,6 +376,11 @@ class AgentMonitorServer:
                         return web.Response(text="ok")
 
         return web.Response(text="not found", status=404)
+
+    async def _handle_clear(self, request: web.Request) -> web.Response:
+        """Mark every done agent as read without focusing any session."""
+        self._session_state.acknowledge_all()
+        return web.Response(text="ok")
 
     async def _screen_text(self, session: iterm2.session.Session) -> str | None:
         try:
