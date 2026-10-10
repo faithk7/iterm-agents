@@ -14,7 +14,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     padding: 8px;
     background: #1e1e1e;
     color: #d4d4d4;
+    -webkit-user-select: none;
+    user-select: none;
   }
+  input { -webkit-user-select: text; user-select: text; }
   .header {
     display: flex;
     align-items: center;
@@ -66,6 +69,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   .repo-header:hover .chevron { color: #d4d4d4; }
   .agent {
+    position: relative;
     padding: 5px 8px;
     margin: 3px 0;
     border-radius: 4px;
@@ -102,8 +106,68 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .agent-type.cursor { background: #2a2a4a; color: #b4b4f0; }
   .agent-type.devin { background: #3a2a4a; color: #d4a4e8; }
   .agent-type.kimi { background: #12233d; color: #5b87c9; }
+  .label {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #3a3a28;
+    color: #dcdcaa;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .label-editor {
+    position: absolute;
+    top: 3px;
+    left: 6px;
+    right: 6px;
+    z-index: 10;
+  }
+  .label-editor input {
+    width: 100%;
+    background: #252526;
+    border: 1px solid #569cd6;
+    border-radius: 4px;
+    color: #d4d4d4;
+    font-size: 11px;
+    padding: 4px 6px;
+    outline: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  }
+  .ctx-menu {
+    position: fixed;
+    z-index: 20;
+    min-width: 110px;
+    padding: 3px 0;
+    background: #252526;
+    border: 1px solid #454545;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    outline: none;
+  }
+  .ctx-item {
+    padding: 4px 12px;
+    font-size: 11px;
+    color: #d4d4d4;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .ctx-item:hover { background: #094771; }
   .session-name { color: #d4d4d4; font-size: 11px; margin-top: 2px; }
-  .branch { color: #ce9178; font-size: 11px; margin-top: 2px; }
+  .branch-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 2px;
+  }
+  .branch {
+    color: #ce9178;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .action-hint { color: #4ec9b0; font-size: 10px; margin-top: 3px; }
   .count {
     font-size: 11px;
@@ -229,6 +293,111 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       if (header) toggleGroup(header.parentElement.dataset.key);
     });
 
+    // Right-click a card for its action menu. The menu and the label editor
+    // both live outside the polling render's reach until dismissed.
+    let ctxMenu = null;
+    let labelEditorOpen = false;
+
+    document.getElementById('sessions').addEventListener('contextmenu', (e) => {
+      const card = e.target.closest('.agent');
+      if (!card) return;
+      e.preventDefault();
+      openCtxMenu(card.dataset.session, e.clientX, e.clientY);
+    });
+
+    function openCtxMenu(sessionId, x, y) {
+      closeCtxMenu();
+      closeLabelEditor();
+      const session = allSessions.find(s => s.id === sessionId);
+      const items = [
+        ['label', 'Label\u2026'],
+        ['focus', 'Focus session'],
+      ];
+      if (session && session.agent_state === 'awaiting_user')
+        items.push(['read', 'Mark as read']);
+      const menu = document.createElement('div');
+      menu.className = 'ctx-menu';
+      for (const [action, text] of items) {
+        const item = document.createElement('div');
+        item.className = 'ctx-item';
+        item.textContent = text;
+        item.addEventListener('click', (e) => {
+          e.stopPropagation();
+          closeCtxMenu();
+          if (action === 'label') openLabelEditor(sessionId);
+          else if (action === 'focus') focusSession(sessionId);
+          else markSessionRead(sessionId);
+        });
+        menu.appendChild(item);
+      }
+      document.body.appendChild(menu);
+      menu.style.left = Math.min(x, window.innerWidth - menu.offsetWidth - 4) + 'px';
+      menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 4) + 'px';
+      // Focus the menu so the webview actually receives the Esc key — a
+      // right-click alone does not move keyboard focus off the terminal.
+      menu.tabIndex = -1;
+      menu.focus({ preventScroll: true });
+      ctxMenu = menu;
+    }
+
+    function closeCtxMenu() {
+      if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
+    }
+
+    document.addEventListener('click', closeCtxMenu);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeCtxMenu();
+    });
+    // Clicks outside the webview never reach the page; the window blur does.
+    window.addEventListener('blur', closeCtxMenu);
+
+    async function markSessionRead(sessionId) {
+      try {
+        await fetch('/api/clear?session=' + encodeURIComponent(sessionId));
+      } catch(e) {}
+      await loadSessions(true);
+    }
+
+    function openLabelEditor(sessionId) {
+      const card = document.querySelector(`.agent[data-session="${sessionId}"]`);
+      if (!card) return;
+      closeLabelEditor();
+      const session = allSessions.find(s => s.id === sessionId);
+      const wrap = document.createElement('div');
+      wrap.className = 'label-editor';
+      const input = document.createElement('input');
+      input.value = (session && session.label) || '';
+      input.placeholder = 'Label\u2026';
+      input.maxLength = 40;
+      wrap.appendChild(input);
+      wrap.addEventListener('click', e => e.stopPropagation());
+      card.appendChild(wrap);
+      labelEditorOpen = true;
+      input.focus();
+      input.select();
+      input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') saveLabel(sessionId, input.value.trim());
+        else if (e.key === 'Escape') closeLabelEditor();
+      });
+      input.addEventListener('blur', () => setTimeout(closeLabelEditor, 100));
+    }
+
+    function closeLabelEditor() {
+      const ed = document.querySelector('.label-editor');
+      if (ed) ed.remove();
+      labelEditorOpen = false;
+    }
+
+    async function saveLabel(sessionId, label) {
+      try {
+        await fetch('/api/label?session=' + encodeURIComponent(sessionId) +
+                    '&label=' + encodeURIComponent(label));
+      } catch(e) {}
+      closeLabelEditor();
+      await loadSessions(true);
+    }
+
     function toggleGroup(key) {
       if (collapsedRepos.has(key)) collapsedRepos.delete(key);
       else collapsedRepos.add(key);
@@ -314,7 +483,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
       // pointerDown suppresses stray interval writes mid-click; renders a
       // click handler asked for are safe — the click already dispatched.
-      if (force || !pointerDown) {
+      // An open context menu or label editor is also left untouched.
+      if (force || (!pointerDown && !labelEditorOpen && !ctxMenu)) {
         container.innerHTML = html;
       }
 
@@ -333,11 +503,18 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         const typeBadge = s.agent_type
           ? `<span class="agent-type ${s.agent_type}">${s.agent_type}</span>`
           : '';
+        const labelTitle = s.label ? esc(s.label).replace(/"/g, '&quot;') : '';
+        const labelChip = s.label
+          ? `<span class="label" title="${labelTitle}">${esc(s.label)}</span>`
+          : '';
         const nameLine = s.name && s.name !== s.path
           ? `<div class="session-name">${esc(s.name)}</div>`
           : '';
-        const branchLine = s.branch
-          ? `<div class="branch">${esc(s.branch)}</div>`
+        const branchLine = s.branch || labelChip
+          ? `<div class="branch-row">
+               <span class="branch">${s.branch ? esc(s.branch) : ''}</span>
+               ${labelChip}
+             </div>`
           : '';
         const actionHint = s.awaiting_user
           ? '<div class="action-hint">Click to clear</div>'

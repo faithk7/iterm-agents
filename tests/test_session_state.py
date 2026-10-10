@@ -83,3 +83,32 @@ class TestSessionStateTracker:
 
         assert session["agent_state"] == ""
         assert session["awaiting_user"] is False
+
+    def test_set_label_surfaces_in_apply(self) -> None:
+        tracker = SessionStateTracker()
+
+        tracker.set_label("session-1", "blocked on review")
+        [session] = tracker.apply([_session("idle")])
+
+        assert session["label"] == "blocked on review"
+
+    def test_empty_label_clears(self) -> None:
+        tracker = SessionStateTracker()
+
+        tracker.set_label("session-1", "wip")
+        tracker.set_label("session-1", "")
+        [session] = tracker.apply([_session("idle")])
+
+        assert session["label"] == ""
+
+    def test_label_is_dropped_when_session_disappears(self) -> None:
+        tracker = SessionStateTracker()
+
+        tracker.set_label("session-1", "wip")
+        tracker.apply([_session("idle")])
+
+        # session-1 vanishes for a scan; its label is pruned with it.
+        tracker.apply([_session("idle", session_id="session-2")])
+
+        [same] = tracker.apply([_session("idle", session_id="session-1")])
+        assert same["label"] == ""

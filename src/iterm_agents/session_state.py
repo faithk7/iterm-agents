@@ -13,6 +13,7 @@ class SessionStateTracker:
     def __init__(self) -> None:
         self._last_agent_states: dict[str, str] = {}
         self._awaiting_user_sessions: set[str] = set()
+        self._labels: dict[str, str] = {}
 
     def apply(self, sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Decorate sessions with transient UI state derived from state transitions."""
@@ -29,6 +30,8 @@ class SessionStateTracker:
             raw_state = str(session.get("agent_state", "") or "")
             if not session_id:
                 continue
+
+            session["label"] = self._labels.get(session_id, "")
 
             if not agent_type or raw_state not in {"running", "idle"}:
                 self._awaiting_user_sessions.discard(session_id)
@@ -47,8 +50,20 @@ class SessionStateTracker:
                 session["awaiting_user"] = True
 
         self._awaiting_user_sessions.intersection_update(active_session_ids)
+        self._labels = {
+            session_id: label
+            for session_id, label in self._labels.items()
+            if session_id in active_session_ids
+        }
         self._last_agent_states = next_last_agent_states
         return sessions
+
+    def set_label(self, session_id: str, label: str) -> None:
+        """Attach a custom label to a session row; an empty label clears it."""
+        if label:
+            self._labels[session_id] = label
+        else:
+            self._labels.pop(session_id, None)
 
     def acknowledge(self, session_id: str) -> None:
         """Clear the transient completion state for a session."""

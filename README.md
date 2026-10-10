@@ -86,6 +86,9 @@ separate from it2ag's autolaunch script.
 - Each row shows a color-coded agent badge and a status: **running**, **done**,
   or **idle**. A row with no detected agent shows its session name only.
 - Click a row to jump to that terminal pane; a done row's mark clears on click.
+- Right-click a card for its menu: label it, focus it, or mark it read.
+  Labels show as a chip in the card's top row and last until the session or
+  the monitor exits.
 - Header buttons: `✓` marks every done session as read, `⊏` collapses or
   expands all repo groups, `↻` refreshes.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.

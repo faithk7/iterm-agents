@@ -39,6 +39,7 @@ _HOME_DIR = os.path.expanduser("~")
 
 
 def _resolve_bound_port(addresses: list[object]) -> int:
+    """The single port the site bound to; rejects ambiguous runner state."""
     ports = {
         address[1]
         for address in addresses
@@ -52,6 +53,7 @@ def _resolve_bound_port(addresses: list[object]) -> int:
 
 
 async def _session_variable(session: iterm2.session.Session, name: str) -> object:
+    """Fetch one session variable, or None when the read fails."""
     try:
         return await session.async_get_variable(name)
     except Exception:
@@ -67,6 +69,7 @@ class AgentMonitorServer:
         port: int = DEFAULT_PORT,
         host: str = DEFAULT_HOST,
     ) -> None:
+        """Store config and scan state; nothing connects until start()."""
         self.connection = connection
         self.host = host
         self.port = port
@@ -81,14 +84,17 @@ class AgentMonitorServer:
 
     @property
     def url(self) -> str:
+        """Base URL the panel WebView loads."""
         return f"http://{self.host}:{self.port}/"
 
     async def start(self) -> None:
+        """Start HTTP, register the Agents tool, and open every toolbelt."""
         app = web.Application()
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/api/sessions", self._handle_sessions)
         app.router.add_get("/api/focus", self._handle_focus)
         app.router.add_get("/api/clear", self._handle_clear)
+        app.router.add_get("/api/label", self._handle_label)
         app.router.add_get("/api/events", self._handle_sse)
 
         runner = web.AppRunner(app)
@@ -259,6 +265,7 @@ class AgentMonitorServer:
         return response
 
     async def _handle_index(self, request: web.Request) -> web.Response:
+        """Serve the single-page panel UI."""
         return web.Response(text=AGENT_MONITOR_HTML, content_type="text/html")
 
     _SCAN_CACHE_TTL = 0.9
@@ -280,6 +287,7 @@ class AgentMonitorServer:
             return web.json_response(sessions)
 
     async def _scan_sessions(self) -> list[dict[str, str | int]]:
+        """Snapshot every session: variables, agent state, git, screen hints."""
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
             return []
@@ -380,6 +388,7 @@ class AgentMonitorServer:
         path: str,
         agent: AgentInfo | None,
     ) -> dict[str, str | int]:
+        """Build one session's API row, upgrading idle agents via the screen."""
         git = await self._git_for(path) if path else None
         agent_state = agent.state.value if agent else ""
         if agent is not None and agent.state is AgentState.IDLE:
@@ -401,6 +410,7 @@ class AgentMonitorServer:
         }
 
     async def _handle_focus(self, request: web.Request) -> web.Response:
+        """Focus a session's pane; also clears its done mark."""
         session_id = request.query.get("session", "")
         if not session_id:
             return web.Response(text="no session id", status=400)
@@ -420,11 +430,24 @@ class AgentMonitorServer:
         return web.Response(text="not found", status=404)
 
     async def _handle_clear(self, request: web.Request) -> web.Response:
-        """Mark every done agent as read without focusing any session."""
-        self._session_state.acknowledge_all()
+        """Mark done agents as read without focusing; one session, or all when omitted."""
+        session_id = request.query.get("session", "")
+        if session_id:
+            self._session_state.acknowledge(session_id)
+        else:
+            self._session_state.acknowledge_all()
+        return web.Response(text="ok")
+
+    async def _handle_label(self, request: web.Request) -> web.Response:
+        """Set or clear a session's custom label."""
+        session_id = request.query.get("session", "")
+        if not session_id:
+            return web.Response(text="no session id", status=400)
+        self._session_state.set_label(session_id, request.query.get("label", ""))
         return web.Response(text="ok")
 
     async def _screen_text(self, session: iterm2.session.Session) -> str | None:
+        """The session's visible screen as text, or None when the read fails."""
         try:
             screen = await session.async_get_screen_contents()
             return "\n".join(screen.line(index).string for index in range(screen.number_of_lines))
