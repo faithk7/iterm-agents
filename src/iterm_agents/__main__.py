@@ -30,6 +30,7 @@ def _acquire_single_instance(lock_path: Path) -> bool:
 
 
 async def _run(connection: iterm2.connection.Connection, port: int) -> None:
+    """Build and start the monitor inside the iterm2 connection's event loop."""
     server = AgentMonitorServer(connection, port=port)
     await server.start()
     print(f"iterm-agents: running ({server.url})")
@@ -37,6 +38,7 @@ async def _run(connection: iterm2.connection.Connection, port: int) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    """CLI entry: parse flags, hold a single-instance lock, run the monitor."""
     parser = argparse.ArgumentParser(
         prog="iterm-agents",
         description=(

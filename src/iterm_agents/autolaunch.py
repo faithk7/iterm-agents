@@ -72,12 +72,15 @@ subprocess.Popen(_command(), cwd=PROJECT_ROOT)
 
 @dataclass(frozen=True)
 class AutoLaunchInstallResult:
+    """Where the wrapper was written, whether it changed, and which kind."""
+
     path: Path
     changed: bool
     mode: Literal["binary", "project"]
 
 
 def autolaunch_script_path(base_dir: Path | None = None) -> Path:
+    """Path of the AutoLaunch wrapper script."""
     root = base_dir if base_dir is not None else AUTO_LAUNCH_DIR
     return root / AUTO_LAUNCH_SCRIPT_NAME
 
@@ -87,6 +90,7 @@ def build_autolaunch_script(
     launch_mode: LaunchMode = "auto",
     project_root: Path | None = None,
 ) -> tuple[str, Literal["binary", "project"]]:
+    """Render the wrapper script for the requested launch mode."""
     if launch_mode == "binary":
         return BINARY_AUTO_LAUNCH_SCRIPT, "binary"
 
@@ -112,6 +116,7 @@ def install_autolaunch(
     launch_mode: LaunchMode = "auto",
     project_root: Path | None = None,
 ) -> AutoLaunchInstallResult:
+    """Write the wrapper unless a different file exists and force is off."""
     path = script_path if script_path is not None else autolaunch_script_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -137,6 +142,7 @@ def install_autolaunch(
 
 
 def _detect_project_root() -> Path | None:
+    """The project checkout this code runs from; None for installed copies."""
     module_path = Path(__file__).resolve()
     src_dir = module_path.parent.parent
     project_root = src_dir.parent

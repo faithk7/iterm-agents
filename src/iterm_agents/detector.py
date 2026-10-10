@@ -20,6 +20,8 @@ from git import Repo
 
 
 class AgentType(Enum):
+    """The coding agents this monitor recognizes."""
+
     CLAUDE = "claude"
     CODEX = "codex"
     CURSOR = "cursor"
@@ -28,12 +30,16 @@ class AgentType(Enum):
 
 
 class AgentState(Enum):
+    """Whether an agent is mid-turn or waiting for input."""
+
     RUNNING = "running"
     IDLE = "idle"
 
 
 @dataclass
 class ProcessInfo:
+    """A process-table row: pid, parent pid, and the full command line."""
+
     pid: int
     ppid: int
     command: str
@@ -41,6 +47,8 @@ class ProcessInfo:
 
 @dataclass
 class AgentInfo:
+    """A detected agent process and the iTerm2 session shell it belongs to."""
+
     agent_type: AgentType
     state: AgentState
     pid: int
@@ -121,6 +129,7 @@ def _comm_basename(comm: str) -> str:
 
 
 def _executable_token(command: str) -> str:
+    """The first token of a command line — the invoked program, minus args."""
     command = command.strip()
     if not command:
         return ""
@@ -128,14 +137,17 @@ def _executable_token(command: str) -> str:
 
 
 def _executable_name(command: str) -> str:
+    """The executable's basename, e.g. ``claude`` from ``/opt/x/claude -v``."""
     return _comm_basename(_executable_token(command))
 
 
 def _is_claude_process(command: str) -> bool:
+    """True for the Claude Code CLI."""
     return _executable_name(command) == "claude"
 
 
 def _is_codex_process(command: str) -> bool:
+    """True for the Codex CLI."""
     return _executable_name(command) == "codex"
 
 
@@ -168,6 +180,7 @@ _EXECUTABLE_AGENT_TYPES = {
 
 
 def _classify(command: str) -> AgentType | None:
+    """Map a command line to an agent type, or None for everything else."""
     agent_type = _EXECUTABLE_AGENT_TYPES.get(_executable_name(command))
     if agent_type is not None:
         return agent_type
@@ -177,10 +190,12 @@ def _classify(command: str) -> AgentType | None:
 
 
 def _is_agent_process(command: str) -> bool:
+    """True when the command belongs to a recognized agent."""
     return _classify(command) is not None
 
 
 def _has_busy_child(table: dict[int, ProcessInfo], pid: int) -> bool:
+    """True when a sandbox or sleep-prevention descendant marks a live turn."""
     for descendant in _get_descendants(table, pid):
         if _executable_name(descendant.command) in _BUSY_CHILD_NAMES:
             return True
@@ -475,6 +490,8 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
 
 @dataclass
 class GitInfo:
+    """Repo display info: name, checked-out branch, and main repo path."""
+
     repo: str
     branch: str
     root_repo: str
