@@ -86,12 +86,15 @@ def _get_children(table: dict[int, ProcessInfo], pid: int) -> list[ProcessInfo]:
 
 def _get_descendants(table: dict[int, ProcessInfo], pid: int) -> list[ProcessInfo]:
     """Get all descendants of a process (BFS)."""
+    children: dict[int, list[ProcessInfo]] = {}
+    for proc in table.values():
+        children.setdefault(proc.ppid, []).append(proc)
     descendants: list[ProcessInfo] = []
     queue = [pid]
     visited: set[int] = {pid}
     while queue:
         current = queue.pop(0)
-        for child in _get_children(table, current):
+        for child in children.get(current, []):
             if child.pid not in visited:
                 visited.add(child.pid)
                 descendants.append(child)
@@ -435,8 +438,9 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
     """
     table = _build_process_table()
     agents: list[AgentInfo] = []
-    # Batch-fetch codex active PIDs from IOKit assertions (one pmset call)
-    codex_active_pids = _get_codex_active_pids()
+    # Lazily fetched: `pmset` spawns a subprocess, so skip it entirely on
+    # scans where no codex process exists.
+    codex_active_pids: set[int] | None = None
 
     for proc in table.values():
         agent_type = _classify(proc.comm)
@@ -448,6 +452,8 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
         elif agent_type is AgentType.CODEX:
             state = _detect_codex_state(table, proc.pid)
             # IOKit assertion is per-PID and authoritative
+            if codex_active_pids is None:
+                codex_active_pids = _get_codex_active_pids()
             if proc.pid in codex_active_pids:
                 state = AgentState.RUNNING
         else:

@@ -21,6 +21,7 @@ from iterm_agents.detector import (
     AgentInfo,
     AgentState,
     AgentType,
+    GitInfo,
     cursor_activity_signature,
     cursor_turn_is_live,
     detect_agents,
@@ -49,6 +50,15 @@ def _resolve_bound_port(addresses: list[object]) -> int:
     return ports.pop()
 
 
+async def _session_variable(
+    session: iterm2.session.Session, name: str
+) -> object:
+    try:
+        return await session.async_get_variable(name)
+    except Exception:
+        return None
+
+
 class AgentMonitorServer:
     """Manages the aiohttp server and iTerm2 Toolbelt integration."""
 
@@ -67,6 +77,7 @@ class AgentMonitorServer:
         self._scan_lock = asyncio.Lock()
         self._scan_cache: tuple[float, list[dict[str, str | int]]] = (0.0, [])
         self._toolbelt_ready_windows: set[str] = set()
+        self._git_cache: dict[str, tuple[float, GitInfo]] = {}
 
     @property
     def url(self) -> str:
@@ -285,20 +296,25 @@ class AgentMonitorServer:
                 await self._ensure_toolbelts_visible(new_window_ids)
             )
 
-        # Collect session PIDs for agent-session mapping
+        # Collect session PIDs for agent-session mapping. Fetching pid and
+        # path per session serially costs two RPC round trips per session;
+        # gathering sends them all at once.
+        all_sessions = [
+            session
+            for window in iterm2_app.terminal_windows
+            for tab in window.tabs
+            for session in tab.sessions
+        ]
+        pids, paths = await asyncio.gather(
+            asyncio.gather(*(_session_variable(s, "pid") for s in all_sessions)),
+            asyncio.gather(*(_session_variable(s, "path") for s in all_sessions)),
+        )
         session_map: dict[int, iterm2.session.Session] = {}
-        sessions_info: list[dict[str, str | int]] = []
-
-        for window in iterm2_app.terminal_windows:
-            for tab in window.tabs:
-                for session in tab.sessions:
-                    pid: int | None = None
-                    try:
-                        pid = await session.async_get_variable("pid")
-                    except Exception:
-                        pid = None
-                    if pid is not None:
-                        session_map[pid] = session
+        session_paths: dict[int, str] = {}
+        for session, pid, path in zip(all_sessions, pids, paths, strict=True):
+            if isinstance(pid, int):
+                session_map[pid] = session
+                session_paths[pid] = path if isinstance(path, str) else ""
 
         # Detect agents and map to sessions. Off the event loop: it spawns
         # `ps`/`pmset` subprocesses that would stall focus requests.
@@ -313,39 +329,19 @@ class AgentMonitorServer:
             if detected.session_pid is not None:
                 agent_by_session_pid[detected.session_pid] = detected
 
-        # Build response
-        for pid, session in session_map.items():
-            path = ""
-            try:
-                path = await session.async_get_variable("path") or ""
-            except Exception:
-                path = ""
-
-            git = await asyncio.to_thread(get_git_info, path) if path else None
-            agent: AgentInfo | None = agent_by_session_pid.get(pid)
-            home = os.path.expanduser("~")
-            agent_state = agent.state.value if agent else ""
-            if agent is not None and agent.state is AgentState.IDLE:
-                if agent.agent_type is AgentType.CURSOR:
-                    agent_state = await self._cursor_state_from_screen(session, agent_state)
-                elif agent.agent_type in (AgentType.DEVIN, AgentType.CODEX, AgentType.KIMI):
-                    agent_state = await self._screen_hint_state(
-                        session, agent.agent_type, agent_state
+        sessions_info = list(
+            await asyncio.gather(
+                *(
+                    self._session_row(
+                        pid,
+                        session,
+                        session_paths[pid],
+                        agent_by_session_pid.get(pid),
                     )
-
-            sessions_info.append(
-                {
-                    "id": session.session_id,
-                    "name": session.name or "",
-                    "path": path.replace(home, "~") if path else "",
-                    "repo": git.repo if git else "",
-                    "branch": git.branch if git else "",
-                    "root_repo": git.root_repo.replace(home, "~") if git else "",
-                    "agent_type": agent.agent_type.value if agent else "",
-                    "agent_state": agent_state,
-                    "pid": pid,
-                }
+                    for pid, session in session_map.items()
+                )
             )
+        )
 
         # Sort: running first, then completion-waiting, idle, then non-agents
         state_priority = {"running": 0, "awaiting_user": 1, "idle": 2}
@@ -357,6 +353,48 @@ class AgentMonitorServer:
         )
 
         return sessions_info
+
+    _GIT_CACHE_TTL = 5.0
+
+    async def _git_for(self, path: str) -> GitInfo | None:
+        """Repo info for a path, cached briefly; sessions rarely move."""
+        now = time.monotonic()
+        cached = self._git_cache.get(path)
+        if cached is not None and now - cached[0] < self._GIT_CACHE_TTL:
+            return cached[1]
+        info = await asyncio.to_thread(get_git_info, path)
+        self._git_cache[path] = (now, info)
+        return info
+
+    async def _session_row(
+        self,
+        pid: int,
+        session: iterm2.session.Session,
+        path: str,
+        agent: AgentInfo | None,
+    ) -> dict[str, str | int]:
+        git = await self._git_for(path) if path else None
+        agent_state = agent.state.value if agent else ""
+        if agent is not None and agent.state is AgentState.IDLE:
+            if agent.agent_type is AgentType.CURSOR:
+                agent_state = await self._cursor_state_from_screen(session, agent_state)
+            elif agent.agent_type in (AgentType.DEVIN, AgentType.CODEX, AgentType.KIMI):
+                agent_state = await self._screen_hint_state(
+                    session, agent.agent_type, agent_state
+                )
+
+        home = os.path.expanduser("~")
+        return {
+            "id": session.session_id,
+            "name": session.name or "",
+            "path": path.replace(home, "~") if path else "",
+            "repo": git.repo if git else "",
+            "branch": git.branch if git else "",
+            "root_repo": git.root_repo.replace(home, "~") if git else "",
+            "agent_type": agent.agent_type.value if agent else "",
+            "agent_state": agent_state,
+            "pid": pid,
+        }
 
     async def _handle_focus(self, request: web.Request) -> web.Response:
         session_id = request.query.get("session", "")
