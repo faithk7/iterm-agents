@@ -132,6 +132,15 @@ uv run mypy src/         # typecheck (src/ only; tests use fakes)
 `uv sync` installs the project editable, so code in `src/` is picked up after
 restarting the monitor.
 
+## Acknowledgements
+
+[it2ag](https://github.com/mkusaka/it2ag) by
+[@mkusaka](https://github.com/mkusaka) — the project this is derived from.
+Its process scan, toolbelt panel, session list, git and worktree grouping,
+click-to-focus, and the Claude Code and Codex activity signals are reused
+here; the Cursor Agent, Devin, and Kimi Code detection is new. See
+[NOTICE](NOTICE).
+
 ## License
 
 GPL-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

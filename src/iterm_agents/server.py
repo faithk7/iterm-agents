@@ -160,9 +160,7 @@ class AgentMonitorServer:
             return ensured
 
         key_id = (
-            iterm2_app.current_window.window_id
-            if iterm2_app.current_window is not None
-            else None
+            iterm2_app.current_window.window_id if iterm2_app.current_window is not None else None
         )
         targets = [
             w
@@ -319,11 +317,7 @@ class AgentMonitorServer:
         # Detect agents and map to sessions. Off the event loop: it spawns
         # `ps`/`pmset` subprocesses that would stall focus requests.
         session_pids = set(session_map.keys())
-        agents = (
-            await asyncio.to_thread(detect_agents, session_pids)
-            if session_pids
-            else []
-        )
+        agents = await asyncio.to_thread(detect_agents, session_pids) if session_pids else []
         agent_by_session_pid: dict[int, AgentInfo] = {}
         for detected in agents:
             if detected.session_pid is not None:
@@ -392,9 +386,7 @@ class AgentMonitorServer:
             if agent.agent_type is AgentType.CURSOR:
                 agent_state = await self._cursor_state_from_screen(session, agent_state)
             elif agent.agent_type in (AgentType.DEVIN, AgentType.CODEX, AgentType.KIMI):
-                agent_state = await self._screen_hint_state(
-                    session, agent.agent_type, agent_state
-                )
+                agent_state = await self._screen_hint_state(session, agent.agent_type, agent_state)
 
         return {
             "id": session.session_id,
@@ -435,9 +427,7 @@ class AgentMonitorServer:
     async def _screen_text(self, session: iterm2.session.Session) -> str | None:
         try:
             screen = await session.async_get_screen_contents()
-            return "\n".join(
-                screen.line(index).string for index in range(screen.number_of_lines)
-            )
+            return "\n".join(screen.line(index).string for index in range(screen.number_of_lines))
         except Exception:
             return None
 

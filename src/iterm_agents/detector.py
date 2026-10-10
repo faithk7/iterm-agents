@@ -314,9 +314,7 @@ def kimi_screen_shows_active_turn(screen_text: str) -> bool:
     lines = screen_text.splitlines()
     for index in range(len(lines) - 1, max(len(lines) - 24, -1), -1):
         line = lines[index]
-        if "· Tip:" not in line and not any(
-            needle in line for needle in _KIMI_BUSY_NEEDLES
-        ):
+        if "· Tip:" not in line and not any(needle in line for needle in _KIMI_BUSY_NEEDLES):
             continue
         for lookahead in range(index + 1, min(index + 16, len(lines))):
             if lines[lookahead].lstrip().startswith(("╭", "│")):
@@ -336,11 +334,7 @@ def devin_screen_shows_active_turn(screen_text: str) -> bool:
     lines = screen_text.splitlines()
     for index in range(len(lines) - 2, max(len(lines) - 12, -1), -1):
         line = lines[index]
-        if (
-            "esc" in line
-            and "to interrupt)" in line
-            and lines[index + 1].lstrip().startswith("──")
-        ):
+        if "esc" in line and "to interrupt)" in line and lines[index + 1].lstrip().startswith("──"):
             return True
     return False
 
