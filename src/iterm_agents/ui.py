@@ -97,11 +97,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     background: #3c3c3c;
     color: #aaa;
   }
-  .agent-type.claude { background: #2a3a4a; color: #7cb3d4; }
-  .agent-type.codex { background: #2a4a2a; color: #7cd47c; }
+  .agent-type.claude { background: #452c22; color: #e08a63; }
+  .agent-type.codex { background: #1a3a5c; color: #61afef; }
   .agent-type.cursor { background: #2a2a4a; color: #b4b4f0; }
   .agent-type.devin { background: #3a2a4a; color: #d4a4e8; }
-  .agent-type.kimi { background: #4a3a2a; color: #e8c49a; }
+  .agent-type.kimi { background: #12233d; color: #5b87c9; }
   .session-name { color: #d4d4d4; font-size: 11px; margin-top: 2px; }
   .branch { color: #ce9178; font-size: 11px; margin-top: 2px; }
   .action-hint { color: #4ec9b0; font-size: 10px; margin-top: 3px; }
@@ -126,7 +126,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     <span>
       <button class="refresh-btn" id="clear-all" title="Mark all done as read"
               onclick="clearAllDone()">&#10003;</button>
-      <button class="refresh-btn" title="Collapse all" onclick="toggleCollapseAll()">&#8847;</button>
+      <button class="refresh-btn" title="Collapse all"
+              onclick="toggleCollapseAll()">&#8847;</button>
       <button class="refresh-btn" onclick="loadSessions()">&#8635;</button>
     </span>
   </div>
