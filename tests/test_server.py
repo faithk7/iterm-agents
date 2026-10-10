@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from iterm_agents.detector import AgentType
+from iterm_agents.detector import AgentType, GitInfo
 from iterm_agents.server import DEFAULT_HOST, AgentMonitorServer, _resolve_bound_port
 
 
@@ -51,13 +51,14 @@ class _State:
 
 
 class _ScanSession:
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, path: str = "") -> None:
         self.session_id = f"s-{pid}"
         self.name = ""
         self._pid = pid
+        self._path = path
 
     async def async_get_variable(self, name: str) -> object:
-        return self._pid if name == "pid" else ""
+        return self._pid if name == "pid" else self._path
 
 
 class _ScanTab:
@@ -360,6 +361,46 @@ class TestAgentMonitorServer:
 
         focused = {row["id"]: row["focused"] for row in rows}
         assert focused == {"s-11": False, "s-22": True}
+
+    async def test_scan_shares_git_results_and_refreshes_expired_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _App({"w1": True})
+        app.terminal_windows[0].tabs = [
+            _ScanTab(
+                [
+                    _ScanSession(11, "/repo-a"),
+                    _ScanSession(22, "/repo-a"),
+                    _ScanSession(33, "/repo-b"),
+                    _ScanSession(44),
+                ]
+            )
+        ]
+        _patch_iterm(monkeypatch, app)
+        monkeypatch.setattr("iterm_agents.server.detect_agents", lambda _pids: [])
+        calls: list[str] = []
+        branch = "main"
+
+        def fake_git(path: str) -> GitInfo:
+            calls.append(path)
+            return GitInfo(repo=path[1:], branch=branch, root_repo=path)
+
+        monkeypatch.setattr("iterm_agents.server.get_git_info", fake_git)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._toolbelt_ready_windows = {"w1"}
+
+        rows = await server._scan_sessions()
+        assert sorted(calls) == ["/repo-a", "/repo-b"]
+        assert [r["repo"] for r in rows] == ["repo-a", "repo-a", "repo-b", ""]
+        assert [r["branch"] for r in rows] == ["main", "main", "main", ""]
+
+        await server._scan_sessions()
+        assert len(calls) == 2
+        branch = "feature"
+        server._git_cache = {path: (0.0, info) for path, (_, info) in server._git_cache.items()}
+        rows = await server._scan_sessions()
+        assert sorted(calls) == ["/repo-a", "/repo-a", "/repo-b", "/repo-b"]
+        assert [r["branch"] for r in rows] == ["feature", "feature", "feature", ""]
 
     def test_patch_focused_session_moves_the_marker(self) -> None:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]

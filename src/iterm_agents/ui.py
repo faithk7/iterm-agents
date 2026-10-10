@@ -82,7 +82,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     outline: none;
   }
   .agent:hover, .agent.focused { background: #383838; }
-  .agent.cursor-refresh, .agent.cursor-refresh * { cursor: grab; }
   .agent.focused { outline: 1px solid #569cd6; }
   /* The session shown in a window's current tab gets a bar just left of the
      card, so it stays visible under the state's border color. */
@@ -476,6 +475,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         allSessions = await res.json();
         filterSessions(force);
       } catch(e) {
+        lastRenderedInput = '';
+        lastRenderedHtml = '';
         document.getElementById('sessions').innerHTML =
           '<div class="no-results">Failed to load sessions<br>' + esc(String(e)) + '</div>';
       } finally {
@@ -502,6 +503,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // replacing the node under the cursor leaves WebKit showing a stale
     // arrow until the next mouse event.
     let lastRenderedHtml = '';
+    let lastRenderedInput = '';
+
+    function renderKey(sessions) {
+      return JSON.stringify([sessions, [...collapsedRepos].sort()]);
+    }
 
     function buildHtml(sessions) {
       // Group by root_repo
@@ -533,28 +539,26 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // After an optimistic DOM patch the DOM already matches a fresh render;
     // claim it so the next identical render skips the swap (see above).
     function markRendered() {
-      lastRenderedHtml = buildHtml(filteredSessions());
+      const sessions = filteredSessions();
+      lastRenderedHtml = buildHtml(sessions);
+      lastRenderedInput = renderKey(sessions);
     }
 
     function renderSessions(sessions, force) {
       const container = document.getElementById('sessions');
-      if (sessions.length === 0) {
-        container.innerHTML = '<div class="no-results">No sessions found</div>';
-        lastRenderedHtml = '';
-        document.getElementById('count').textContent = '';
-        document.getElementById('clear-all').disabled = true;
-        return;
-      }
-
-      const html = buildHtml(sessions);
-
       // pointerDown suppresses stray interval writes mid-click; renders a
       // click handler asked for are safe — the click already dispatched.
       // An open context menu or label editor is also left untouched.
       if (force || (!pointerDown && !labelEditorOpen && !ctxMenu)) {
-        if (html !== lastRenderedHtml) {
-          container.innerHTML = html;
-          lastRenderedHtml = html;
+        const key = renderKey(sessions);
+        if (key !== lastRenderedInput) {
+          const html = sessions.length ? buildHtml(sessions)
+            : '<div class="no-results">No sessions found</div>';
+          if (html !== lastRenderedHtml) {
+            container.innerHTML = html;
+            lastRenderedHtml = html;
+          }
+          lastRenderedInput = key;
         }
       }
 
@@ -563,12 +567,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       document.getElementById('clear-all').disabled = awaiting === 0;
       const withAgent = sessions.filter(s => s.agent_type).length;
       document.getElementById('count').textContent =
-        `${running} running / ${awaiting} done / ` +
-        `${withAgent} agents / ${sessions.length} sessions`;
+        sessions.length ? `${running} running / ${awaiting} done / ` +
+        `${withAgent} agents / ${sessions.length} sessions` : '';
     }
 
     function renderGroup(repoName, repoPath, items) {
-      const sessionsHtml = items.map(s => {
+      const isCollapsed = collapsedRepos.has(repoPath);
+      const sessionsHtml = isCollapsed ? '' : items.map(s => {
         const meta = stateMeta(s.agent_state);
         const typeBadge = s.agent_type
           ? `<span class="agent-type ${s.agent_type}">${s.agent_type}</span>`
@@ -602,7 +607,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       }).join('');
 
       const titleAttr = repoPath ? ` title="${esc(repoPath)}"` : '';
-      const isCollapsed = collapsedRepos.has(repoPath);
       const chevron = isCollapsed ? '&#9656;' : '&#9662;';
 
       return `<div class="repo-group" data-key="${esc(repoPath).replace(/"/g, '&quot;')}">
@@ -610,7 +614,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           <span>${esc(repoName)}</span>
           <span class="chevron">${chevron}</span>
         </div>
-        ${isCollapsed ? '' : sessionsHtml}
+        ${sessionsHtml}
       </div>`;
     }
 
@@ -647,17 +651,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       // Patch the card in place — the marker arrives via SSE and the poll
       // confirms the rest; a forced rewrite churns the node under the cursor.
       acknowledgeCard(sessionId);
-      refreshCardCursor();
-    }
-
-    // Changing the cursor across frames makes WebKit refresh it after the pane takes focus.
-    function refreshCardCursor() {
-      if (ctxMenu || labelEditorOpen) return;
-      const card = document.querySelector('.agent:hover');
-      if (!card) return;
-      card.classList.add('cursor-refresh');
-      requestAnimationFrame(() => requestAnimationFrame(() =>
-        card.classList.remove('cursor-refresh')));
     }
 
     loadSessions();

@@ -88,11 +88,16 @@ def _build_process_table() -> dict[int, ProcessInfo]:
     return table
 
 
-def _get_descendants(table: dict[int, ProcessInfo], pid: int) -> list[ProcessInfo]:
-    """Get all descendants of a process (BFS)."""
+def _build_children(table: dict[int, ProcessInfo]) -> dict[int, list[ProcessInfo]]:
+    """Index child processes once per process-table snapshot."""
     children: dict[int, list[ProcessInfo]] = {}
     for proc in table.values():
         children.setdefault(proc.ppid, []).append(proc)
+    return children
+
+
+def _get_descendants(children: dict[int, list[ProcessInfo]], pid: int) -> list[ProcessInfo]:
+    """Get all descendants of a process (BFS)."""
     descendants: list[ProcessInfo] = []
     queue: deque[int] = deque([pid])
     visited: set[int] = {pid}
@@ -194,17 +199,17 @@ def _is_agent_process(command: str) -> bool:
     return _classify(command) is not None
 
 
-def _has_busy_child(table: dict[int, ProcessInfo], pid: int) -> bool:
+def _has_busy_child(children: dict[int, list[ProcessInfo]], pid: int) -> bool:
     """True when a sandbox or sleep-prevention descendant marks a live turn."""
-    for descendant in _get_descendants(table, pid):
+    for descendant in _get_descendants(children, pid):
         if _executable_name(descendant.command) in _BUSY_CHILD_NAMES:
             return True
     return False
 
 
-def _detect_claude_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
+def _detect_claude_state(children: dict[int, list[ProcessInfo]], pid: int) -> AgentState:
     """Claude Code spawns caffeinate when running a turn."""
-    for descendant in _get_descendants(table, pid):
+    for descendant in _get_descendants(children, pid):
         if _executable_name(descendant.command) == "caffeinate":
             return AgentState.RUNNING
     return AgentState.IDLE
@@ -247,12 +252,12 @@ def _get_codex_active_pids() -> set[int]:
     return active_pids
 
 
-def _detect_codex_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
+def _detect_codex_state(children: dict[int, list[ProcessInfo]], pid: int) -> AgentState:
     """Detect codex running state via sandbox child processes.
 
     Falls back to IOKit assertion check via detect_agents for batch detection.
     """
-    descendants = _get_descendants(table, pid)
+    descendants = _get_descendants(children, pid)
     for descendant in descendants:
         name = _executable_name(descendant.command)
         if name in ("sandbox-exec", "bwrap", "codex-linux-sandbox"):
@@ -406,14 +411,14 @@ def _cursor_footer_lines(screen_text: str) -> list[str]:
     return [line.strip() for line in lines[start:] if line.strip()]
 
 
-def _detect_busy_child_state(table: dict[int, ProcessInfo], pid: int) -> AgentState:
+def _detect_busy_child_state(children: dict[int, list[ProcessInfo]], pid: int) -> AgentState:
     """Cursor Agent, Devin, and Kimi Code have no published turn signal.
 
     A sleep-prevention or sandbox child means a turn is doing work. With no
     such child the session is listed as idle even if the model is waiting on
     the network.
     """
-    if _has_busy_child(table, pid):
+    if _has_busy_child(children, pid):
         return AgentState.RUNNING
     return AgentState.IDLE
 
@@ -448,6 +453,7 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
                       of these PIDs (iTerm2 session shell PIDs).
     """
     table = _build_process_table()
+    children = _build_children(table)
     agents: list[AgentInfo] = []
     # Lazily fetched: `pmset` spawns a subprocess, so skip it entirely on
     # scans where no codex process exists.
@@ -459,16 +465,16 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
             continue
 
         if agent_type is AgentType.CLAUDE:
-            state = _detect_claude_state(table, proc.pid)
+            state = _detect_claude_state(children, proc.pid)
         elif agent_type is AgentType.CODEX:
-            state = _detect_codex_state(table, proc.pid)
+            state = _detect_codex_state(children, proc.pid)
             # IOKit assertion is per-PID and authoritative
             if codex_active_pids is None:
                 codex_active_pids = _get_codex_active_pids()
             if proc.pid in codex_active_pids:
                 state = AgentState.RUNNING
         else:
-            state = _detect_busy_child_state(table, proc.pid)
+            state = _detect_busy_child_state(children, proc.pid)
 
         session_pid: int | None = None
         if session_pids:

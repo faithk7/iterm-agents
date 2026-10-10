@@ -9,7 +9,7 @@ import pytest
 from iterm_agents.ui import AGENT_MONITOR_HTML
 
 
-def test_focus_updates_refresh_cursor_without_replacing_cards() -> None:
+def test_panel_skips_unchanged_html_and_preserves_focus_updates() -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is needed to exercise the panel JavaScript")
@@ -23,9 +23,8 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const script = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 let writes = 0;
+let escapeElements = 0;
 let cards = [];
-let hovering = true;
-const frames = [];
 const timeouts = [];
 const listeners = {};
 const elements = new Map();
@@ -44,16 +43,17 @@ const context = vm.createContext({
     getElementById: element,
     addEventListener() {},
     querySelectorAll: () => cards,
-    querySelector: selector => selector === '.agent:hover'
-      ? (hovering ? cards[0] : null) : cards[0],
-    createElement: () => ({ set textContent(s) { this.innerHTML = s; } }),
+    querySelector: () => cards[0],
+    createElement: () => {
+      escapeElements++;
+      return { set textContent(s) { this.innerHTML = s; } };
+    },
   },
   window: { addEventListener() {} },
   fetch: url => url.startsWith('/api/focus')
     ? Promise.resolve({ ok: true }) : new Promise(() => {}),
   setInterval() {},
   setTimeout: fn => timeouts.push(fn),
-  requestAnimationFrame: fn => frames.push(fn),
   EventSource: class {
     addEventListener(name, fn) { listeners[name] = fn; }
   },
@@ -79,6 +79,10 @@ cards = [{
 }];
 const originalCard = cards[0];
 const initialWrites = writes;
+escapeElements = 0;
+vm.runInContext('allSessions = JSON.parse(JSON.stringify(allSessions)); filterSessions()', context);
+assert.equal(escapeElements, 0, 'unchanged polls must skip HTML generation');
+assert.equal(writes, initialWrites);
 for (const focused of [['one'], ['two'], ['one']]) {
   listeners['focus-changed']({ data: JSON.stringify({ focused }) });
   while (timeouts.length) timeouts.shift()();
@@ -94,27 +98,48 @@ assert.ok(!classes.has('awaiting-user'));
 assert.ok(hintRemoved);
 assert.equal(status.innerHTML, '&#9675; idle');
 assert.ok(!element('sessions').innerHTML.includes('hidden'));
+assert.ok(element('count').textContent.includes('0 done'));
 (async () => {
   for (let i = 0; i < 3; i++) {
     await vm.runInContext("focusSession('one')", context);
-    assert.ok(classes.has('cursor-refresh'), 'every click must refresh the cursor');
-    assert.equal(frames.length, 1);
-    frames.shift()();
-    assert.ok(classes.has('cursor-refresh'), 'keep the new style for one frame');
-    frames.shift()();
-    assert.ok(!classes.has('cursor-refresh'), 'restore the pointing hand');
     assert.equal(writes, initialWrites);
+    assert.equal(cards[0], originalCard);
   }
-  hovering = false;
-  await vm.runInContext("focusSession('one')", context);
-  assert.equal(frames.length, 0, 'do not change cursors outside cards');
-  hovering = true;
-  for (const guard of ['labelEditorOpen', 'ctxMenu']) {
-    vm.runInContext(`${guard} = true`, context);
-    await vm.runInContext("focusSession('one')", context);
-    assert.equal(frames.length, 0, 'leave editors and menus alone');
-    vm.runInContext(`${guard} = false`, context);
+  vm.runInContext("toggleGroup('')", context);
+  assert.ok(!element('sessions').innerHTML.includes('class="agent '));
+  escapeElements = 0;
+  vm.runInContext("allSessions[0].label = 'new label'; filterSessions()", context);
+  assert.equal(escapeElements, 2, 'collapsed groups only escape the header');
+  vm.runInContext("toggleGroup('')", context);
+  assert.ok(element('sessions').innerHTML.includes('new label'));
+
+  for (const guard of ['pointerDown', 'labelEditorOpen', 'ctxMenu']) {
+    const before = writes;
+    escapeElements = 0;
+    vm.runInContext(`${guard} = true; allSessions[0].name += 'x'; filterSessions()`, context);
+    assert.equal(writes, before, 'interaction guards must defer replacement');
+    assert.equal(escapeElements, 0);
+    vm.runInContext(`${guard} = false; filterSessions()`, context);
+    assert.equal(writes, before + 1, 'deferred changes must render after the guard clears');
   }
+
+  vm.runInContext('loadingSessions = false', context);
+  const snapshot = vm.runInContext('JSON.parse(JSON.stringify(allSessions))', context);
+  context.fetch = () => Promise.reject(new Error('offline'));
+  await vm.runInContext('loadSessions()', context);
+  assert.ok(element('sessions').innerHTML.includes('Failed to load sessions'));
+  context.fetch = () => Promise.resolve({json: async () => snapshot});
+  await vm.runInContext('loadSessions()', context);
+  assert.ok(!element('sessions').innerHTML.includes('Failed to load sessions'));
+  assert.ok(element('sessions').innerHTML.includes('new label'));
+
+  element('search').value = 'no match';
+  vm.runInContext('filterSessions()', context);
+  const emptyWrites = writes;
+  vm.runInContext('filterSessions()', context);
+  assert.equal(writes, emptyWrites, 'unchanged empty results must preserve the DOM');
+  assert.equal(element('count').textContent, '');
+  assert.ok(element('clear-all').disabled);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """,
         ],

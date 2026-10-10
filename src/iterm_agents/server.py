@@ -409,6 +409,15 @@ class AgentMonitorServer:
         focused_ids = _focused_session_ids(iterm2_app)
         self._focused_ids = focused_ids
 
+        # Resolve each directory once before rows share its cached Git info.
+        git_paths = set(session_paths.values()) - {""}
+        git_by_path = dict(
+            zip(
+                git_paths,
+                await asyncio.gather(*(self._git_for(path) for path in git_paths)),
+                strict=True,
+            )
+        )
         sessions_info = await asyncio.gather(
             *(
                 self._session_row(
@@ -417,6 +426,7 @@ class AgentMonitorServer:
                     session_paths[pid],
                     agent_by_session_pid.get(pid),
                     session.session_id in focused_ids,
+                    git_by_path.get(session_paths[pid]),
                 )
                 for pid, session in session_map.items()
             )
@@ -460,9 +470,9 @@ class AgentMonitorServer:
         path: str,
         agent: AgentInfo | None,
         focused: bool,
+        git: GitInfo | None,
     ) -> dict[str, str | int]:
         """Build one session's API row, upgrading idle agents via the screen."""
-        git = await self._git_for(path) if path else None
         agent_state = agent.state.value if agent else ""
         if agent is not None and agent.state is AgentState.IDLE:
             if agent.agent_type is AgentType.CURSOR:

@@ -12,6 +12,7 @@ from iterm_agents.detector import (
     AgentType,
     GitInfo,
     ProcessInfo,
+    _build_children,
     _comm_basename,
     _detect_claude_state,
     _detect_codex_state,
@@ -30,10 +31,7 @@ from iterm_agents.detector import (
 
 
 def _make_table(procs: list[tuple[int, int, str]]) -> dict[int, ProcessInfo]:
-    return {
-        pid: ProcessInfo(pid=pid, ppid=ppid, command=command)
-        for pid, ppid, command in procs
-    }
+    return {pid: ProcessInfo(pid=pid, ppid=ppid, command=command) for pid, ppid, command in procs}
 
 
 class TestCommBasename:
@@ -84,7 +82,7 @@ class TestDescendants:
                 (40, 20, "node"),
             ]
         )
-        desc = _get_descendants(table, 20)
+        desc = _get_descendants(_build_children(table), 20)
         pids = {d.pid for d in desc}
         assert pids == {30, 40}
 
@@ -99,18 +97,18 @@ class TestDescendants:
                 (50, 40, "python"),
             ]
         )
-        desc = _get_descendants(table, 20)
+        desc = _get_descendants(_build_children(table), 20)
         pids = {d.pid for d in desc}
         assert pids == {30, 40, 50}
 
     def test_no_descendants(self) -> None:
         table = _make_table([(20, 10, "claude")])
-        desc = _get_descendants(table, 20)
+        desc = _get_descendants(_build_children(table), 20)
         assert desc == []
 
     def test_nonexistent_pid(self) -> None:
         table = _make_table([(20, 10, "claude")])
-        desc = _get_descendants(table, 999)
+        desc = _get_descendants(_build_children(table), 999)
         assert desc == []
 
 
@@ -165,7 +163,7 @@ class TestDetectClaudeState:
                 (30, 20, "caffeinate"),
             ]
         )
-        assert _detect_claude_state(table, 20) == AgentState.RUNNING
+        assert _detect_claude_state(_build_children(table), 20) == AgentState.RUNNING
 
     def test_idle_without_caffeinate(self) -> None:
         table = _make_table(
@@ -173,7 +171,7 @@ class TestDetectClaudeState:
                 (20, 10, "claude"),
             ]
         )
-        assert _detect_claude_state(table, 20) == AgentState.IDLE
+        assert _detect_claude_state(_build_children(table), 20) == AgentState.IDLE
 
     def test_running_with_deep_caffeinate(self) -> None:
         table = _make_table(
@@ -183,7 +181,7 @@ class TestDetectClaudeState:
                 (40, 30, "caffeinate"),
             ]
         )
-        assert _detect_claude_state(table, 20) == AgentState.RUNNING
+        assert _detect_claude_state(_build_children(table), 20) == AgentState.RUNNING
 
     def test_idle_with_unrelated_children(self) -> None:
         table = _make_table(
@@ -193,7 +191,7 @@ class TestDetectClaudeState:
                 (40, 20, "python"),
             ]
         )
-        assert _detect_claude_state(table, 20) == AgentState.IDLE
+        assert _detect_claude_state(_build_children(table), 20) == AgentState.IDLE
 
 
 class TestDetectCodexState:
@@ -204,7 +202,7 @@ class TestDetectCodexState:
                 (30, 20, "sandbox-exec"),
             ]
         )
-        assert _detect_codex_state(table, 20) == AgentState.RUNNING
+        assert _detect_codex_state(_build_children(table), 20) == AgentState.RUNNING
 
     def test_running_with_bwrap(self) -> None:
         table = _make_table(
@@ -213,7 +211,7 @@ class TestDetectCodexState:
                 (30, 20, "bwrap"),
             ]
         )
-        assert _detect_codex_state(table, 20) == AgentState.RUNNING
+        assert _detect_codex_state(_build_children(table), 20) == AgentState.RUNNING
 
     def test_running_with_linux_sandbox(self) -> None:
         table = _make_table(
@@ -222,7 +220,7 @@ class TestDetectCodexState:
                 (30, 20, "codex-linux-sandbox"),
             ]
         )
-        assert _detect_codex_state(table, 20) == AgentState.RUNNING
+        assert _detect_codex_state(_build_children(table), 20) == AgentState.RUNNING
 
     def test_idle_without_sandbox(self) -> None:
         table = _make_table(
@@ -230,7 +228,7 @@ class TestDetectCodexState:
                 (20, 10, "codex"),
             ]
         )
-        assert _detect_codex_state(table, 20) == AgentState.IDLE
+        assert _detect_codex_state(_build_children(table), 20) == AgentState.IDLE
 
     def test_idle_with_non_sandbox_children(self) -> None:
         """Non-sandbox children don't affect _detect_codex_state directly.
@@ -243,7 +241,7 @@ class TestDetectCodexState:
             ]
         )
         # _detect_codex_state only checks for sandbox-exec descendants
-        assert _detect_codex_state(table, 20) == AgentState.IDLE
+        assert _detect_codex_state(_build_children(table), 20) == AgentState.IDLE
 
 
 class TestGetCodexActivePids:
@@ -299,6 +297,32 @@ class TestGetCodexActivePids:
 
 
 class TestDetectAgents:
+    def test_child_index_is_shared_and_rebuilt_for_each_snapshot(self) -> None:
+        table = _make_table(
+            [
+                (10, 1, "zsh"),
+                (20, 10, "claude"),
+                (30, 20, "caffeinate"),
+                (40, 1, "zsh"),
+                (50, 40, "codex"),
+                (60, 50, "sandbox-exec"),
+                (70, 1, "zsh"),
+                (80, 70, "kimi"),
+                (90, 80, "caffeinate"),
+            ]
+        )
+        with (
+            patch("iterm_agents.detector._build_process_table", return_value=table),
+            patch("iterm_agents.detector._get_codex_active_pids", return_value=set()),
+            patch("iterm_agents.detector._build_children", wraps=_build_children) as build,
+        ):
+            assert [a.state for a in detect_agents()] == [AgentState.RUNNING] * 3
+            assert build.call_count == 1
+            for pid in (30, 60, 90):
+                del table[pid]
+            assert [a.state for a in detect_agents()] == [AgentState.IDLE] * 3
+            assert build.call_count == 2
+
     @patch("iterm_agents.detector._get_codex_active_pids", return_value=set())
     @patch("iterm_agents.detector._build_process_table")
     def test_finds_claude_and_codex(self, mock_table: object, mock_pids: object) -> None:
@@ -468,7 +492,7 @@ class TestDetectAgents:
                 (30, 20, "/usr/bin/caffeinate -dims"),
             ]
         )
-        assert _detect_claude_state(table, 20) == AgentState.RUNNING
+        assert _detect_claude_state(_build_children(table), 20) == AgentState.RUNNING
 
 
 class TestScreenShowsActiveTurn:
