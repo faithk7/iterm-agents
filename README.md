@@ -1,10 +1,96 @@
 # iterm-agents
 
-An iTerm2 toolbelt panel that lists coding agents running in terminal sessions.
+An iTerm2 toolbelt panel that watches your terminal sessions and shows which
+coding agents are running — Claude Code, Codex, Cursor Agent, Devin, and Kimi
+Code — so you can see at a glance which turn is still working and which just
+finished, then click through to that pane.
 
-This is a separate project derived from [it2ag](https://github.com/mkusaka/it2ag) by mkusaka (GPL-2.0). The panel, the session list, git grouping, click-to-focus, and the Claude Code and Codex activity signals come from that code. See [NOTICE](NOTICE).
+![The Agents toolbelt panel](docs/agents-panel.png)
 
-## What it recognizes
+Derived from [it2ag](https://github.com/mkusaka/it2ag) by mkusaka (GPL-2.0).
+The panel, session list, git grouping, click-to-focus, and the Claude Code and
+Codex activity signals come from that project. See [NOTICE](NOTICE).
+
+## Supported agents
+
+| Agent | Detected process |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Cursor Agent | `cursor-agent` (or `node`/`agent` on its `index.js`) |
+| Devin CLI | `devin` |
+| Kimi Code | `kimi` / `kimi-code` |
+
+## What you get
+
+- **An Agents panel in every window** — opened in each existing window at
+  launch and in every window you open afterwards; a toolbelt you hide by hand
+  stays hidden.
+- **Live state per session** — `running` while a turn is live, `done` when one
+  just finished, `idle` otherwise.
+- **Repo grouping** — sessions group under their git repo, with worktrees
+  folding into the main repo; groups collapse individually or all at once.
+- **Jump to a session** — click a row to focus that pane; `Cmd+Shift+M`
+  focuses the panel's search box from anywhere in iTerm2.
+- **Search** — filter sessions by name, repo, branch, or agent type.
+
+## Requirements
+
+- iTerm2 with the Python API enabled (setup below).
+- iTerm2 **Shell Integration** installed in your shell.
+- Python ≥ 3.10. The commands below use [uv](https://docs.astral.sh/uv/);
+  a plain venv + pip works too.
+
+## Set up iTerm2
+
+1. **Enable the Python API** — iTerm2 → **Settings → General → Magic** →
+   tick **Enable Python API**. Restart iTerm2 if it asks.
+2. **Install Shell Integration** — **iTerm2 menu → Install Shell
+   Integration**, then restart your shell (or open a new tab). It reports
+   each session's working directory, which powers the repo/branch labels
+   and lets a row click land on the right pane.
+3. **Start the monitor** — `uv run iterm-agents` (see below), or install
+   the AutoLaunch wrapper so it starts with iTerm2.
+4. The **Agents** panel opens in every window's toolbelt automatically.
+   If you close it, **View → Show Toolbelt** reopens it for that window;
+   `Cmd+Shift+M` shows it and focuses the search box.
+
+![An iTerm2 window with the Agents toolbelt on the right](docs/iterm-window.png)
+
+## Install
+
+```bash
+git clone https://github.com/faithk7/iterm-agents.git
+cd iterm-agents
+uv sync    # or: python3 -m venv .venv && .venv/bin/pip install .
+```
+
+## Run
+
+```bash
+uv run iterm-agents    # or: .venv/bin/iterm-agents
+```
+
+To start it automatically whenever iTerm2 launches (recommended):
+
+```bash
+uv run iterm-agents --install-autolaunch    # add --force to overwrite an existing wrapper
+```
+
+then restart iTerm2. The wrapper is written to
+`~/Library/Application Support/iTerm2/Scripts/AutoLaunch/iterm-agents.py`,
+separate from it2ag's autolaunch script.
+
+## Usage
+
+- Each row shows a color-coded agent badge and a status: **running**, **done**,
+  or **idle**. A row with no detected agent shows its session name only.
+- Click a row to jump to that terminal pane; a done row's mark clears on click.
+- Header buttons: `✓` marks every done session as read, `⊏` collapses or
+  expands all repo groups, `↻` refreshes.
+- `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.
+
+## How detection works
 
 | Agent | Process | Running |
 | --- | --- | --- |
@@ -12,30 +98,39 @@ This is a separate project derived from [it2ag](https://github.com/mkusaka/it2ag
 | Codex | executable name `codex` | a sandbox child, the IOKit assertion `Codex is running an active turn`, or the `(… esc to interrupt)` hint above its composer |
 | Cursor Agent | `cursor-agent`, or `node` / `agent` whose command line contains both `/cursor-agent/` and `index.js` | a busy child, or a composer footer that says `ctrl+c to stop` and is still changing |
 | Devin CLI | executable name `devin` | a busy child, or the `(esc … to interrupt)` hint above its input box |
-| Kimi Code | executable name `kimi` or `kimi-code` | a busy child, or the `Working…` status label above its composer |
+| Kimi Code | executable name `kimi` or `kimi-code` | a busy child, or an in-progress status label above its composer |
 
-The Cursor editor (`Cursor.app`), the Kimi desktop app, and `kimi-cu` are not treated as these CLIs.
+Not treated as CLIs: the Cursor editor (`Cursor.app`), the Kimi desktop app,
+and `kimi-cu`. Cursor Agent runs as a private `node` binary, so its command
+line must point at `index.js` under `/cursor-agent/`; a bare `agent` process
+with no such path is ignored.
 
-Cursor Agent launches as a private `node` binary, so a basename check of `node` would match every Node process. The command line has to point at that CLI's `index.js`. A bare `agent` process with no `cursor-agent` path is ignored, because other tools install a binary of that name.
+Cursor Agent, Devin, and Kimi Code publish no turn signal like Claude's or
+Codex's, so with no busy child they fall back to the session's screen. Each
+hint must appear above the live composer, so transcript echoes don't match.
+All hints are English UI text; a localized build may not be detected.
 
-Cursor Agent, Devin, and Kimi Code do not publish a turn signal the way Claude and Codex do. A live process with no sandbox or `caffeinate` child is shown as idle, including while the model is waiting on the network, unless the session's own footer says a turn is live. Cursor's composer counts as running while `ctrl+c to stop` is on screen and the visible screen is still changing, including the spinner animation that keeps a quiet thinking or reconnect stall looking alive. A footer that stays the same is idle, so a status line Cursor never clears does not keep the session marked running. Devin's status line counts as running while it shows the `esc twice to interrupt` hint above the input box; the hint is redrawn in place and disappears when the turn ends, so no staleness check is needed. Codex's status line works the same way: `esc to interrupt` above the `›` composer or the `? for shortcuts` footer means a live turn. That covers Codex launches with sandboxing bypassed, where no sandbox child ever appears and recent Codex builds no longer raise the IOKit assertion. Kimi Code counts as running while its status line shows an in-progress label — `Working…`, `Prompting…`, `Orchestrating…`, `Queued…`, `Rate limited…` or `Thinking…` — above the composer box; while a tool runs the label is blank and the line shows just the spinner and a ` · Tip:` hint, which counts too. The terminal labels (`Completed.`, `Failed.`, `Aborted.`, `Cancelled.`) do not count.
+- **Cursor** — `ctrl+c to stop` in the composer while the screen keeps
+  changing; the spinner alone keeps a quiet stall alive. A footer frozen for
+  30 seconds counts as finished.
+- **Devin** — `esc twice/again to interrupt` above the input box.
+- **Codex** — `esc to interrupt` above the `›` composer or `? for shortcuts`
+  footer; covers sandbox-disabled launches where no child or assertion appears.
+- **Kimi** — a `Working…`/`Prompting…`/`Orchestrating…`/`Queued…`/
+  `Rate limited…`/`Thinking…` status label, or a bare spinner + `· Tip:` line
+  while a tool runs. `Completed.`/`Failed.`/`Aborted.`/`Cancelled.` don't
+  count.
 
-## Run
-
-iTerm2 needs **Settings → General → Magic → Enable Python API**. Shell Integration supplies the working directory used for the repo and branch.
+## Development
 
 ```bash
-uv sync
-uv run iterm-agents
+uv run pytest            # tests
+uv run ruff check src/   # lint
+uv run mypy src/         # typecheck (src/ only; tests use fakes)
 ```
 
-The panel is named **Agents**. `Cmd+Shift+M` focuses its search box. Click a row to jump to that pane.
-
-```bash
-uv run iterm-agents --install-autolaunch
-```
-
-That writes `~/Library/Application Support/iTerm2/Scripts/AutoLaunch/iterm-agents.py`, which is separate from it2ag's autolaunch script.
+`uv sync` installs the project editable, so code in `src/` is picked up after
+restarting the monitor.
 
 ## License
 
