@@ -23,15 +23,11 @@ finished, then click through to that pane.
 
 ## What you get
 
-- **An Agents panel in every window** — opened in each existing window at
-  launch and in each new window when you first activate it; background scans
-  never switch window focus, and a toolbelt you hide by hand stays hidden.
-- **Live state per session** — `running` while a turn is live, `done` when one
-  just finished, `idle` otherwise.
-- **Repo grouping** — sessions group under their git repo, with worktrees
-  folding into the main repo; groups collapse individually or all at once.
-- **Jump to a session** — click a row to focus that pane.
-- **Search** — filter sessions by name, repo, branch, or agent type.
+- **Multiple windows** — an Agents panel in every iTerm2 window.
+- **Live status** — `running` (working), `done` (just finished), or `idle`.
+- **Repo grouping** — worktrees share their main repo's group; collapse one or all.
+- **Click to jump** — focus a session's terminal pane.
+- **Search** — find sessions by name, repo, branch, or agent.
 
 Everything stays on your Mac. The monitor reads local processes, git
 repositories, and the visible text of your iTerm2 sessions; it serves the panel
@@ -52,23 +48,21 @@ only on `127.0.0.1` and sends nothing over the network.
 
 ## Quick start
 
+Set up iTerm2, run the installer, and reopen iTerm2 to get started.
+
 ### Set up iTerm2
 
-Both install methods need these settings. Open iTerm2: press `Cmd+Space`, type
-`iTerm`, and press `Enter`. If you have not installed it yet, download it from
-[iterm2.com](https://iterm2.com/) and move it into **Applications**. Then:
+Open iTerm2. If you have not installed it yet, download it from
+[iterm2.com](https://iterm2.com/) and move it into **Applications**.
 
 1. **Enable the Python API** — press `Cmd+,`, open **General → Magic**, and
    tick **Enable Python API**. Restart iTerm2 if it asks.
 2. **Enable Shell Integration** — choose **iTerm2 → Install Shell
    Integration**, follow the prompts, and open a new tab with `Cmd+T`. It
-   reports each session's working directory for repo/branch labels and
-   grouping. On iTerm2 3.5+, you can instead enable **Settings → Profiles →
-   General → Command → Load shell integration automatically** for a supported
-   login shell. See
+   lets the panel show repo and branch information. See
    [iTerm2's Shell Integration guide](https://iterm2.com/documentation-shell-integration.html).
 
-### macOS installer (recommended)
+### Install
 
 Paste this command into an iTerm2 tab:
 
@@ -76,13 +70,22 @@ Paste this command into an iTerm2 tab:
 curl -fsSL https://raw.githubusercontent.com/faithk7/iterm-agents/main/install.sh | bash
 ```
 
-The [installer](install.sh) downloads the project, reuses uv or installs it
-without changing your shell profiles, sets up Python 3.12 and the monitor's
-dependencies, and installs the AutoLaunch wrapper. It installs under
+The [installer](install.sh) sets up uv, Python, dependencies, and automatic
+startup with iTerm2. It installs under
 `~/.local/share/iterm-agents` and requires no Homebrew or `sudo`.
 
-When it finishes, quit and reopen iTerm2. The **Agents** panel should appear in
-the toolbelt. If it is hidden, choose **View → Show Toolbelt**.
+### Start using it
+
+1. When installation finishes, press `Cmd+Q` to quit iTerm2, then reopen it.
+2. The **Agents** panel should appear on the right. If it is hidden, choose
+   **View → Show Toolbelt**.
+3. In a terminal, enter your project and run an installed agent such as
+   `claude` or `codex`. Its session status appears in the panel; click to jump
+   to its pane.
+
+## Installation options
+
+### Manual startup and updates
 
 To start the installed monitor manually:
 
@@ -140,22 +143,6 @@ below inside iTerm2.
 The **Agents** panel opens in each window's toolbelt. If it is hidden, use
 **View → Show Toolbelt**.
 
-### Alternative: venv and pip
-
-If you prefer pip, use a `python3` interpreter at version 3.10 or newer.
-This is a complete alternative to the uv commands above:
-
-```bash
-git clone https://github.com/faithk7/iterm-agents.git
-cd iterm-agents
-python3 -m venv .venv
-.venv/bin/python -m pip install .
-.venv/bin/iterm-agents
-```
-
-You do not need to activate the virtual environment. For later commands,
-replace `uv run iterm-agents` with `.venv/bin/iterm-agents`.
-
 ## Check that it works
 
 1. If you started the monitor in a terminal, it should print something like:
@@ -193,7 +180,6 @@ terminal, then install the AutoLaunch wrapper from the checkout:
 uv run iterm-agents --install-autolaunch
 ```
 
-For the pip setup, use `.venv/bin/iterm-agents --install-autolaunch`.
 Then quit and reopen iTerm2. You can now use the panel without keeping a
 dedicated monitor tab open.
 
@@ -202,10 +188,10 @@ The wrapper is written to
 separate from it2ag's autolaunch script. Only one monitor instance runs at a
 time; starting another prints `iterm-agents: already running` and exits.
 
-The uv setup records the checkout's absolute path; the pip setup records the
-installed executable's absolute path. Keep the checkout and `.venv` in place.
-If you move them, recreate the virtual environment at its new location and
-reinstall the wrapper with:
+Manual uv installations record the checkout's absolute path; keep the checkout
+and `.venv` in place. The installer records the installed executable's absolute
+path; keep its installation folder in place. If you move a manual checkout,
+recreate its virtual environment at the new location and reinstall the wrapper with:
 
 ```bash
 uv run iterm-agents --install-autolaunch --force
@@ -224,7 +210,8 @@ rm "$HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch/iterm-agents.py"
 
 Removing it prevents future automatic launches; it does not stop an already
 running monitor. Quit and reopen iTerm2 after removing it. You can still start
-the monitor manually with the command from the quick start.
+the monitor manually with the command under
+[Installation options](#installation-options).
 
 ## Uninstall
 
@@ -243,48 +230,25 @@ uses uv.
 
 ## Usage
 
-- Each row shows a color-coded agent badge and a status: **running**, **done**,
-  or **idle**. A row with no detected agent shows its session name only.
-- **Done** means the monitor observed a transition from running to idle. It
-  does not confirm success; check the agent's output for failures or questions.
-  A turn that ended before the monitor started will not have a done mark.
-- Click a row to jump to that terminal pane; a done row's mark clears on click.
-- Each window's panel marks that window's active pane with a blue bar.
-  Switching windows doesn't move other panels' markers or scroll positions.
-- Right-click a card for its menu: label it, focus it, or mark it read.
-  Labels show as a chip in the card's top row and last until the session or
-  the monitor exits.
-- Header buttons: `✓` marks every done session as read, `⊏` collapses or
-  expands all repo groups, `↻` refreshes.
+- **done** means the current turn ended, not that the task succeeded. Clicking
+  the session clears its done mark.
+- Right-click a session to add a label or mark it read. Labels disappear when
+  the session or monitor exits.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.
 
-With the panel focused, you can navigate without the mouse:
-
-| Key       | Action                                                                           |
-| --------- | -------------------------------------------------------------------------------- |
-| `↑` / `↓` | Move between visible session rows; `↑` from the first row returns to search      |
-| `Enter`   | Focus the selected terminal pane                                                 |
-| `Escape`  | Return to search and select its text; close an open context menu or label editor |
-
-Search matches session names, repo names, branches, paths, and agent types.
+With the panel focused, use `↑` / `↓` to select a session, `Enter` to jump to
+its pane, and `Escape` to close a menu or return to search.
 
 ## Troubleshooting
 
-| Symptom                                                       | What to check                                                                                                                                                                        |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `uv: command not found`                                       | Install uv using the quick start, then open a new terminal tab if the installer changed your `PATH`.                                                                                 |
-| Installer says Git is not ready                               | Run `xcode-select --install`, complete Apple's Command Line Tools installation, and rerun the installer.                                                                             |
-| Installer refuses an unmanaged directory                      | Choose another dedicated folder with `--install-dir`; the installer protects existing folders it did not create.                                                                     |
-| Cannot connect to iTerm2                                      | Keep iTerm2 open and enable **Settings → General → Magic → Enable Python API**. Restart iTerm2 if requested.                                                                         |
-| Agents panel is missing                                       | Bring iTerm2 to the foreground and use **View → Show Toolbelt** or `Cmd+Shift+M`. Check that the monitor printed `running`.                                                          |
-| Repo or branch is missing                                     | Enable Shell Integration for that session's profile/shell, open a new tab, and change into a git repository. A session outside a repo has no repo/branch label.                      |
-| Session appears without an agent badge                        | Run a supported CLI in that iTerm2 pane. Detection scans local processes; an agent running on a remote host over SSH is not detected. Desktop apps are excluded.                     |
-| Agent stays idle while working, or done appears early         | Activity detection uses process and screen hints, which can vary by CLI version. Screen hints currently match English UI text. See **How detection works** below.                    |
-| `iterm-agents: already running`                               | A monitor is already active, possibly through AutoLaunch. Use its panel; stop the manual instance with `Ctrl+C` in its terminal before launching another.                            |
-| `Failed to load sessions`                                     | `TypeError: Load failed` means the monitor is not running; check with `pgrep -fl iterm-agents`. Otherwise check its terminal for errors. Restart it, then use the panel's `↻` button. |
-| Blue marker missing in a panel                                | Make that window the active iTerm2 window once, or click inside its panel. The panel then follows that window's active pane.                                                         |
-| AutoLaunch does not start                                     | Try manual startup first. Check that the saved checkout/executable and `.venv` still exist. Reinstall the wrapper with `--install-autolaunch --force` from the working installation. |
-| Wrapper installation says the file already exists and differs | Inspect the wrapper at the path printed in the error. Use `--force` if you intend to replace it.                                                                                     |
+| Symptom | What to check |
+| --- | --- |
+| Panel missing or failing to load | Press `Cmd+Shift+M`; if it still fails, check the [Python API settings](#set-up-iterm2) and try [manual startup](#manual-startup-and-updates). |
+| Repo or branch missing | Enable Shell Integration, open a new tab, and enter a git repository. |
+| Agent not detected | Run a supported CLI in a local iTerm2 pane. Remote agents over SSH and desktop apps are not supported. |
+| Incorrect status | Detection uses processes and English screen hints, which can change between CLI versions. See [How detection works](#how-detection-works). |
+| `already running` | The monitor is already active; use its existing panel. |
+| Automatic startup fails | Check that the installation folder still exists, try manual startup, then reinstall the wrapper using [Automatic startup](#automatic-startup). |
 
 To inspect the available commands or report your version:
 
@@ -298,40 +262,14 @@ port, use `uv run iterm-agents --port 50123`; choose an unused port.
 
 ## How detection works
 
-Sessions are matched by the processes in [Supported agents](#supported-agents).
-A session counts as **running** when:
+Local CLI processes identify agent sessions. Child processes, system activity
+signals, and terminal screen hints indicate whether a turn is running. A
+transition from running to idle produces a **done** mark.
 
-| Agent        | Running signal                                                                           |
-| ------------ | ---------------------------------------------------------------------------------------- |
-| Claude Code  | a `caffeinate` child, the signal it2ag uses                                              |
-| Codex        | a sandbox child, the IOKit assertion `Codex is running an active turn`, or a screen hint |
-| Cursor Agent | a busy child, or a screen hint                                                           |
-| Devin CLI    | a busy child, or a screen hint                                                           |
-| Kimi Code    | a busy child, or a screen hint                                                           |
-
-Not treated as CLIs: the Cursor editor (`Cursor.app`), the Kimi desktop app,
-and `kimi-cu`. Cursor Agent runs as a private `node` binary, so its command
-line must contain both `/cursor-agent/` and `index.js`; a bare `agent` process
-with no such path is ignored.
-
-Cursor Agent, Devin, and Kimi Code publish no turn signal like Claude's or
-Codex's, so with no busy child they fall back to the session's screen. Each
-hint must appear above the live composer, so transcript echoes don't match.
-All hints are English UI text; a localized build may not be detected. The
-screen hints are:
-
-- **Cursor** — `ctrl+c to stop` in the composer while the screen keeps
-  changing; the spinner alone keeps a quiet stall alive. A footer frozen for
-  30 seconds counts as finished.
-- **Devin** — `esc twice/again to interrupt` above the input box.
-- **Codex** — `esc to interrupt` above the `›` composer or `? for shortcuts`
-  footer; covers sandbox-disabled launches where no child or assertion appears.
-  The panel waits for about three seconds of idle before showing **done**, so
-  brief pauses keep showing **running**.
-- **Kimi** — a `Working…`/`Prompting…`/`Orchestrating…`/`Queued…`/
-  `Rate limited…`/`Thinking…` status label, or a bare spinner + `· Tip:` line
-  while a tool runs. `Completed.`/`Failed.`/`Aborted.`/`Cancelled.` don't
-  count.
+Screen hints currently match English text only and may change between CLI
+versions. Remote agents over SSH and desktop apps are not supported. See
+[process detection](src/iterm_agents/detector.py) and
+[screen signals](src/iterm_agents/screen_signals.py) for implementation details.
 
 ## Development
 
