@@ -9,6 +9,214 @@ import pytest
 from iterm_agents.ui import AGENT_MONITOR_HTML
 
 
+def test_panels_bind_independently_before_cross_window_activation() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is needed to exercise the panel JavaScript")
+    script = AGENT_MONITOR_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    result = subprocess.run(
+        [node, "-e", r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const script = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+let keyWindow = 'w1';
+const focus = {w1: 'one', w2: 'two'};
+const activations = [];
+function makePanel(savedName = '') {
+  const elements = new Map();
+  const documentEvents = {};
+  const requests = [];
+  const sources = [];
+  let resolveBinding;
+  let resolveInitialPoll;
+  let ownerKey = false;
+  // iTerm2's WebView may report false even during an actual panel click.
+  const hasFocus = false;
+  const windowEvents = {};
+  const rows = [
+    {id: 'one', name: 'one', agent_state: 'idle', window_id: 'w1'},
+    {id: 'two', name: 'two', agent_state: 'idle', window_id: 'w2'},
+  ];
+  const document = {
+    hasFocus: () => hasFocus,
+    addEventListener(name, fn) {(documentEvents[name] ||= []).push(fn);},
+    querySelectorAll: () => [], querySelector: () => null,
+    createElement: () => ({set textContent(s) {this.innerHTML = s;}}),
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, {
+        value: '', innerHTML: '', focus() {}, select() {}, addEventListener() {},
+        style: {}, offsetWidth: 50, get clientWidth() { return ownerKey ? 49 : 48; },
+      });
+      return elements.get(id);
+    },
+  };
+  const context = vm.createContext({
+    document, window: {
+      name: savedName,
+      addEventListener(name, fn) {(windowEvents[name] ||= []).push(fn);}, innerHeight: 900,
+    },
+    setInterval() {}, setTimeout() {},
+    EventSource: class {
+      constructor(url) { this.url = url; this.listeners = {}; sources.push(this); }
+      close() {this.closed = true;}
+      addEventListener(name, fn) {this.listeners[name] = fn;}
+    },
+    fetch(url) {
+      requests.push(url);
+      if (url === '/api/panel-window') {
+        const sourceWindow = keyWindow;
+        return new Promise(resolve => { resolveBinding = () => resolve({
+          ok: true, json: async () => ({window_id: sourceWindow}),
+        }); });
+      }
+      if (url.startsWith('/api/focus')) {
+        const session = new URL('http://panel' + url).searchParams.get('session');
+        activations.push(session);
+        keyWindow = rows.find(row => row.id === session).window_id;
+        return Promise.resolve({ok: true});
+      }
+      if (url.startsWith('/api/sessions') &&
+          !new URL('http://panel' + url).searchParams.has('window')) {
+        return new Promise(resolve => { resolveInitialPoll = () => resolve({
+          json: async () => rows.map(row => ({...row, focused: false})),
+        }); });
+      }
+      const windowId = new URL('http://panel' + url).searchParams.get('window');
+      return Promise.resolve({headers: {
+        get: () => rows.some(row => row.window_id === windowId) ? 'present' : 'missing',
+      }, json: async () => rows.map(row => ({
+        ...row, focused: row.id === focus[windowId],
+      }))});
+    },
+  });
+  vm.runInContext(script, context);
+  return {context, requests, sources, documentEvents,
+    bind: () => resolveBinding(), initialPoll: () => resolveInitialPoll(),
+    setOwnerKey: key => { ownerKey = key; },
+    probe: () => vm.runInContext('bindIfOwnerWindowKey()', context),
+    loseFocus: () => windowEvents.blur.forEach(fn => fn())};
+}
+async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
+(async () => {
+  const a = makePanel();
+  assert.ok(!a.requests.includes('/api/panel-window'), 'loading cannot guess the owner');
+  assert.equal(vm.runInContext("document.getElementById('focus-hint').hidden", a.context),
+    false, 'an unbound panel must show its first-click instruction');
+  a.documentEvents.pointerdown.forEach(fn => fn({target: {closest: () => null}, button: 0}));
+  assert.equal(vm.runInContext("document.getElementById('focus-hint').textContent", a.context),
+    'Connecting focus marker…');
+  const firstClick = vm.runInContext("focusSession('two')", a.context);
+  assert.equal(activations.length, 0, 'binding must finish before activating another window');
+  a.bind();
+  await firstClick;
+  a.loseFocus();
+  assert.equal(keyWindow, 'w2');
+  assert.equal(vm.runInContext('panelWindowId', a.context), 'w1');
+  assert.equal(vm.runInContext("document.getElementById('focus-hint').hidden", a.context), true,
+    'successful binding removes the instruction');
+  const b = makePanel();
+  const binding = vm.runInContext('bindPanelWindow()', b.context);
+  b.bind();
+  await binding;
+  assert.equal(vm.runInContext('panelWindowId', b.context), 'w2');
+  for (const [panel, owner] of [[a, 'w1'], [b, 'w2']]) {
+    assert.equal(panel.sources.at(-1).url, '/api/events?window=' + owner);
+    assert.ok(panel.sources[0].closed, 'binding replaces the unscoped event stream');
+    panel.initialPoll();
+    await settle();
+    assert.equal(vm.runInContext('allSessions.length', panel.context), 2,
+      'a binding completed during startup must refetch without waiting for the poll timer');
+    await vm.runInContext('loadSessions()', panel.context);
+    assert.deepEqual(Array.from(vm.runInContext('allSessions.map(s => s.focused)', panel.context)),
+      owner === 'w1' ? [true, false] : [false, true]);
+    assert.ok(vm.runInContext("document.getElementById('sessions').innerHTML", panel.context)
+      .includes('idle current'), 'the bound panel must render the blue current-pane indicator');
+    const requestsBefore = panel.requests.length;
+    panel.sources.at(-1).listeners['sessions-changed']();
+    await settle();
+    assert.equal(panel.requests.length, requestsBefore + 1,
+      'a completed scan updates the panel immediately without its polling timer');
+    assert.ok(panel.requests.at(-1).includes('cached=1'));
+  }
+  keyWindow = 'w2';
+  await vm.runInContext('bindPanelWindow()', a.context);
+  assert.equal(vm.runInContext('panelWindowId', a.context), 'w1',
+    'ownership cannot follow the key window');
+  assert.equal(a.requests.filter(url => url === '/api/panel-window').length, 1);
+  for (const [panel, owner] of [[a, 'w1'], [b, 'w2']]) {
+    const savedName = vm.runInContext('window.name', panel.context);
+    const reloaded = makePanel(savedName);
+    await settle();
+    assert.equal(vm.runInContext('panelWindowId', reloaded.context), owner,
+      'a reload restores its own owner even when another window is key');
+    assert.equal(reloaded.sources[0].url, '/api/events?window=' + owner);
+    assert.ok(!reloaded.requests.includes('/api/panel-window'),
+      'restoring a known owner requires no simulated click or focus handshake');
+    assert.ok(vm.runInContext("document.getElementById('sessions').innerHTML", reloaded.context)
+      .includes('idle current'), 'restored binding renders the marker without interaction');
+  }
+  const stale = makePanel('iterm-agents:window:closed-window');
+  await settle();
+  assert.equal(vm.runInContext('panelWindowId', stale.context), '',
+    'a closed owner is discarded instead of binding to the current window');
+  assert.equal(vm.runInContext('window.name', stale.context), '');
+  assert.equal(vm.runInContext("document.getElementById('focus-hint').hidden", stale.context),
+    false);
+  const newWindow = makePanel('iterm-agents:window:w2');
+  await settle();
+  newWindow.context.fetch = () => Promise.resolve({
+    headers: {get: () => 'present'},
+    json: async () => [{id: 'one', window_id: 'w1', agent_state: 'idle'}],
+  });
+  await vm.runInContext('loadSessions()', newWindow.context);
+  assert.equal(vm.runInContext('panelWindowId', newWindow.context), 'w2',
+    'an older cached list must not invalidate a newly confirmed window binding');
+  const c = makePanel();
+  const abortedBinding = vm.runInContext('bindPanelWindow()', c.context);
+  c.loseFocus(); c.bind();
+  assert.equal(await abortedBinding, false,
+    'a window switch during binding must not assign the wrong owner');
+  assert.equal(vm.runInContext('panelWindowId', c.context), '');
+  assert.equal(vm.runInContext("document.getElementById('focus-hint').textContent", c.context),
+    'Focus connection failed. Click here to retry.');
+  c.documentEvents.keydown.forEach(fn => fn({key: 'x'}));
+  c.bind();
+  await settle();
+  assert.equal(vm.runInContext('panelWindowId', c.context), keyWindow,
+    'actual keyboard interaction can also bind the panel');
+  keyWindow = 'w1';
+  const d = makePanel(), e = makePanel();
+  d.setOwnerKey(true);
+  d.probe(); e.probe();
+  assert.ok(!e.requests.includes('/api/panel-window'),
+    'a panel whose own window is not key never asks for the current window');
+  d.bind();
+  await settle();
+  assert.equal(vm.runInContext('panelWindowId', d.context), 'w1');
+  keyWindow = 'w2';
+  d.setOwnerKey(false); e.setOwnerKey(true);
+  d.probe(); e.probe();
+  e.bind();
+  await settle();
+  assert.equal(vm.runInContext('panelWindowId', d.context), 'w1',
+    'another window becoming key leaves a bound panel alone');
+  assert.equal(vm.runInContext('panelWindowId', e.context), 'w2',
+    'each panel binds without a click once its own window is key');
+  const f = makePanel();
+  f.setOwnerKey(true);
+  f.probe();
+  f.setOwnerKey(false);
+  f.bind();
+  await settle();
+  assert.equal(vm.runInContext('panelWindowId', f.context), '',
+    'losing key status during the handshake must not assign an owner');
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""],
+        input=json.dumps(script), text=True, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_panel_skips_unchanged_html_and_preserves_focus_updates() -> None:
     node = shutil.which("node")
     if node is None:
@@ -103,14 +311,19 @@ const context = vm.createContext({
   setInterval() {},
   setTimeout: fn => timeouts.push(fn),
   EventSource: class {
-    addEventListener(name, fn) { listeners[name] = fn; }
+    close() {}
+    addEventListener(name, fn) {
+      listeners[name] = name === 'focus-changed'
+        ? e => fn({data: JSON.stringify({window_id: 'w1', ...JSON.parse(e.data)})}) : fn;
+    }
   },
 });
 vm.runInContext(script, context);
 vm.runInContext(`allSessions = [
-  {id: 'one', name: 'visible', agent_state: 'awaiting_user', awaiting_user: true},
-  {id: 'two', name: 'hidden', agent_state: 'idle'}
+  {id: 'one', name: 'visible', agent_state: 'awaiting_user', awaiting_user: true, window_id: 'w1'},
+  {id: 'two', name: 'hidden', agent_state: 'idle', window_id: 'w1'}
 ];`, context);
+vm.runInContext("panelWindowId = 'w1'", context);
 element('search').value = 'visible';
 vm.runInContext('filterSessions()', context);
 const classes = new Set(['awaiting-user']);
@@ -146,6 +359,10 @@ for (const focused of [['one'], ['two'], ['one']]) {
 assert.equal(scrolls.length, 1, 'refocusing an already visible card must not scroll');
 assert.equal(scrolls[0].options.top, 1470);
 assert.equal(cardPositions.one - viewport.scrollY, 180, 'card top must land one-fifth down');
+const beforeForeignFocus = scrolls.length;
+listeners['focus-changed']({data: JSON.stringify({window_id: 'w2', focused: ['two']})});
+assert.ok(classes.has('current'), 'another window cannot move this panel marker');
+assert.equal(scrolls.length, beforeForeignFocus, 'another window cannot scroll this panel');
 vm.runInContext("acknowledgeCard('one'); filterSessions()", context);
 assert.equal(writes, initialWrites, 'clearing done must preserve the card');
 assert.equal(cards[0], originalCard);

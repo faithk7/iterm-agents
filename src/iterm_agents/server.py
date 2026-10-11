@@ -64,12 +64,13 @@ async def _session_variable(session: iterm2.session.Session, name: str) -> objec
         return None
 
 
-def _focused_session_ids(iterm2_app: iterm2.app.App) -> set[str]:
-    """The active session of the current window's current tab, if any."""
-    window = iterm2_app.current_window
-    tab = window.current_tab if window is not None else None
-    session_id = tab.active_session_id if tab is not None else None
-    return {session_id} if session_id else set()
+def _focused_sessions_by_window(iterm2_app: iterm2.app.App) -> dict[str, str]:
+    """Each window retains the active pane in its selected tab."""
+    return {
+        window.window_id: window.current_tab.active_session_id
+        for window in iterm2_app.terminal_windows
+        if window.current_tab is not None and window.current_tab.active_session_id
+    }
 
 
 class AgentMonitorServer:
@@ -86,18 +87,24 @@ class AgentMonitorServer:
         self.host = host
         self.port = port
         self._sse_clients: weakref.WeakSet[web.StreamResponse] = weakref.WeakSet()
+        self._sse_window_ids: weakref.WeakKeyDictionary[web.StreamResponse, str] = (
+            weakref.WeakKeyDictionary()
+        )
         self._session_state = SessionStateTracker()
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
         self._scan_rpc_gate = asyncio.Semaphore(self._SCAN_RPC_CONCURRENCY)
         self._scan_cache: tuple[float, list[dict[str, str | int]]] = (0.0, [])
+        self._scan_refresh_task: asyncio.Task[None] | None = None
+        self._window_ids: set[str] | None = None
         self._toolbelt_ready_windows: set[str] = set()
         self._git_cache: dict[str, tuple[float, GitInfo]] = {}
         self._keystroke_task: asyncio.Task[None] | None = None
         self._focus_task: asyncio.Task[None] | None = None
         self._focus_worker_task: asyncio.Task[None] | None = None
         self._pending_focus_id: str | None = None
-        self._focused_ids: set[str] = set()
+        self._focused_by_window: dict[str, str] = {}
+        self._session_window_ids: dict[str, str] = {}
         self._sessions_by_id: dict[str, iterm2.session.Session] = {}
         self._detached_tasks: set[asyncio.Task[None]] = set()
 
@@ -111,6 +118,7 @@ class AgentMonitorServer:
         app = web.Application()
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/api/sessions", self._handle_sessions)
+        app.router.add_get("/api/panel-window", self._handle_panel_window)
         app.router.add_get("/api/focus", self._handle_focus)
         app.router.add_get("/api/clear", self._handle_clear)
         app.router.add_get("/api/label", self._handle_label)
@@ -249,7 +257,9 @@ class AgentMonitorServer:
                         and iterm2.keyboard.Modifier.SHIFT in keystroke.modifiers
                     ):
                         await self._ensure_toolbelt_visible()
-                        await self._broadcast_sse("focus-search")
+                        window_id = await self._current_window_id()
+                        if window_id:
+                            await self._broadcast_sse("focus-search", window_id=window_id)
         except Exception as e:
             print(f"iterm-agents: keystroke monitor error: {e}")
 
@@ -284,7 +294,10 @@ class AgentMonitorServer:
         """
         if session_id not in self._sessions_by_id:
             return False
-        self._focused_ids = {session_id}
+        window_id = self._session_window_ids.get(session_id)
+        if window_id is None:
+            return False
+        self._focused_by_window[window_id] = session_id
         self._apply_focused_cache()
         return True
 
@@ -293,30 +306,50 @@ class AgentMonitorServer:
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
             return
-        self._focused_ids = _focused_session_ids(iterm2_app)
+        self._window_ids = {w.window_id for w in iterm2_app.terminal_windows}
+        self._focused_by_window = _focused_sessions_by_window(iterm2_app)
+        self._session_window_ids = {
+            session.session_id: window.window_id
+            for window in iterm2_app.terminal_windows
+            for tab in window.tabs
+            for session in tab.sessions
+        }
         self._apply_focused_cache()
         await self._broadcast_focus()
 
     def _apply_focused_cache(self) -> None:
         """Update the focused flags on the cached scan in place."""
         for row in self._scan_cache[1]:
-            row["focused"] = row["id"] in self._focused_ids
+            session_id = str(row["id"])
+            window_id = self._session_window_ids.get(session_id)
+            row["focused"] = self._focused_by_window.get(window_id or "") == session_id
 
     async def _broadcast_focus(self) -> None:
-        """Push the current focused-id set to every WebView."""
-        await self._broadcast_sse("focus-changed", {"focused": sorted(self._focused_ids)})
+        """Send each panel only the focus state of its owning window."""
+        for window_id in set(self._sse_window_ids.values()):
+            session_id = self._focused_by_window.get(window_id)
+            await self._broadcast_sse(
+                "focus-changed",
+                {"window_id": window_id, "focused": [session_id] if session_id else []},
+                window_id=window_id,
+            )
 
-    async def _broadcast_sse(self, event: str, data: object = None) -> None:
-        """Send an SSE event to all connected WebView clients."""
+    async def _broadcast_sse(
+        self, event: str, data: object = None, *, window_id: str | None = None
+    ) -> None:
+        """Send an event, optionally restricted to panels bound to one window."""
         payload = json.dumps({} if data is None else data)
         dead: list[web.StreamResponse] = []
-        for client in self._sse_clients:
+        for client in list(self._sse_clients):
+            if window_id is not None and self._sse_window_ids.get(client) != window_id:
+                continue
             try:
                 await client.write(f"event: {event}\ndata: {payload}\n\n".encode())
             except Exception:
                 dead.append(client)
         for d in dead:
             self._sse_clients.discard(d)
+            self._sse_window_ids.pop(d, None)
 
     async def _handle_sse(self, request: web.Request) -> web.StreamResponse:
         """SSE endpoint for pushing events to the WebView."""
@@ -326,6 +359,7 @@ class AgentMonitorServer:
         response.headers["X-Accel-Buffering"] = "no"
         await response.prepare(request)
         self._sse_clients.add(response)
+        self._sse_window_ids[response] = request.query.get("window", "")
 
         # Keep connection alive
         try:
@@ -336,7 +370,25 @@ class AgentMonitorServer:
             pass
         finally:
             self._sse_clients.discard(response)
+            self._sse_window_ids.pop(response, None)
         return response
+
+    async def _current_window_id(self) -> str:
+        """Resolve the key window once the panel has seen its own window is key."""
+        app = await iterm2.app.async_get_app(self.connection)
+        if app is None:
+            return ""
+        self._window_ids = {w.window_id for w in app.terminal_windows}
+        await app.async_refresh_focus()
+        return app.current_window.window_id if app.current_window is not None else ""
+
+    async def _handle_panel_window(self, request: web.Request) -> web.Response:
+        """Binding handshake; the page keeps this id for its lifetime."""
+        window_id = await self._current_window_id()
+        if not window_id:
+            raise web.HTTPServiceUnavailable(text="No current terminal window")
+        print(f"iterm-agents: panel focus binding resolved to {window_id}", flush=True)
+        return web.json_response({"window_id": window_id})
 
     async def _handle_index(self, request: web.Request) -> web.Response:
         """Serve the single-page panel UI."""
@@ -345,7 +397,7 @@ class AgentMonitorServer:
     _SCAN_CACHE_TTL = 0.9
     _SCAN_RPC_CONCURRENCY = 4
 
-    async def _handle_sessions(self, request: web.Request) -> web.Response:
+    async def _handle_sessions(self, request: web.Request | None) -> web.Response:
         """Serve the latest scan; concurrent or rapid polls share one scan.
 
         Clicking a session row refetches immediately, so without this cache a
@@ -353,6 +405,12 @@ class AgentMonitorServer:
         RPC pipe backs up. The cache holds the raw scan; SessionStateTracker
         runs per request on copies so acknowledged flags clear correctly.
         """
+        # A newly opened panel can display the last complete snapshot without
+        # joining a slow scan or waiting for new-window Toolbelt setup.
+        if request is not None and request.query.get("cached") == "1" and self._scan_cache[0]:
+            self._refresh_sessions_in_background()
+            return self._sessions_response(request)
+
         async with self._scan_lock:
             timestamp, raw = self._scan_cache
             fresh = False
@@ -368,10 +426,46 @@ class AgentMonitorServer:
                     timestamp = time.monotonic()
                     self._scan_cache = (timestamp, raw)
                     fresh = True
-            sessions = self._session_state.apply(
-                [dict(s) for s in raw], fresh=fresh, observed_at=timestamp
-            )
-            return web.json_response(sessions)
+            response = self._sessions_response(request, fresh=fresh)
+            if fresh:
+                self._spawn_detached(self._broadcast_sse("sessions-changed"))
+            return response
+
+    def _refresh_sessions_in_background(self) -> None:
+        """At most one refresh; callers keep reading the completed snapshot."""
+        if time.monotonic() - self._scan_cache[0] <= self._SCAN_CACHE_TTL:
+            return
+        if self._scan_lock.locked():
+            return
+        if self._scan_refresh_task is not None and not self._scan_refresh_task.done():
+            return
+        self._scan_refresh_task = asyncio.create_task(self._refresh_sessions())
+        self._detached_tasks.add(self._scan_refresh_task)
+        self._scan_refresh_task.add_done_callback(self._detached_tasks.discard)
+
+    async def _refresh_sessions(self) -> None:
+        await self._handle_sessions(None)
+
+    def _sessions_response(
+        self, request: web.Request | None, *, fresh: bool = False
+    ) -> web.Response:
+        """Decorate a completed snapshot without advancing cached observations."""
+        timestamp, raw = self._scan_cache
+        sessions = self._session_state.apply(
+            [dict(s) for s in raw], fresh=fresh, observed_at=timestamp
+        )
+        window_id = request.query.get("window", "") if request is not None else ""
+        focused_id = self._focused_by_window.get(window_id)
+        for row in sessions:
+            row["focused"] = bool(window_id and row["id"] == focused_id)
+        # Cached rows can predate a new window. Their absence is not evidence
+        # that its confirmed binding is invalid; use the native window snapshot.
+        owner = "unknown"
+        if window_id and self._window_ids is not None:
+            owner = "present" if window_id in self._window_ids else "missing"
+        return web.json_response(
+            sessions, headers={"X-Agents-Window": owner, "Cache-Control": "no-store"}
+        )
 
     async def _scan_sessions(self) -> list[dict[str, str | int]]:
         """Snapshot every session: variables, agent state, git, screen hints."""
@@ -382,6 +476,7 @@ class AgentMonitorServer:
         # A window opened after startup hides its toolbelt; open it once.
         # A window the user hides by hand stays marked and is not reopened.
         window_ids = {w.window_id for w in iterm2_app.terminal_windows}
+        self._window_ids = window_ids
         self._toolbelt_ready_windows.intersection_update(window_ids)
         new_window_ids = window_ids - self._toolbelt_ready_windows
         if new_window_ids:
@@ -401,6 +496,12 @@ class AgentMonitorServer:
             for session in tab.sessions
         ]
         self._sessions_by_id = {s.session_id: s for s in all_sessions}
+        self._session_window_ids = {
+            session.session_id: window.window_id
+            for window in iterm2_app.terminal_windows
+            for tab in window.tabs
+            for session in tab.sessions
+        }
         pids, paths = await asyncio.gather(
             asyncio.gather(*(self._scan_session_variable(s, "pid") for s in all_sessions)),
             asyncio.gather(*(self._scan_session_variable(s, "path") for s in all_sessions)),
@@ -423,8 +524,8 @@ class AgentMonitorServer:
 
         # Each window's current tab marks its active session so the UI can
         # flag the focused pane; these are cached properties, not RPCs.
-        focused_ids = _focused_session_ids(iterm2_app)
-        self._focused_ids = focused_ids
+        self._focused_by_window = _focused_sessions_by_window(iterm2_app)
+        focused_ids = set(self._focused_by_window.values())
 
         # Resolve each directory once before rows share its cached Git info.
         git_paths = set(session_paths.values()) - {""}
@@ -444,6 +545,7 @@ class AgentMonitorServer:
                     agent_by_session_pid.get(pid),
                     session.session_id in focused_ids,
                     git_by_path.get(session_paths[pid]),
+                    self._session_window_ids.get(session.session_id, ""),
                 )
                 for pid, session in session_map.items()
             )
@@ -496,6 +598,7 @@ class AgentMonitorServer:
         agent: AgentInfo | None,
         focused: bool,
         git: GitInfo | None,
+        window_id: str = "",
     ) -> dict[str, str | int]:
         """Build one session's API row, upgrading idle agents via the screen."""
         agent_state = agent.state.value if agent else ""
@@ -507,6 +610,7 @@ class AgentMonitorServer:
 
         return {
             "id": session.session_id,
+            "window_id": window_id,
             "name": session.name or "",
             "path": path.replace(_HOME_DIR, "~") if path else "",
             "repo": git.repo if git else "",
@@ -576,6 +680,7 @@ class AgentMonitorServer:
                     if session.session_id == session_id:
                         await session.async_activate()
                         self._sessions_by_id[session_id] = session
+                        self._session_window_ids[session_id] = window.window_id
                         if self._patch_focused_session(session_id):
                             self._spawn_detached(self._broadcast_focus())
                         return

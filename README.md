@@ -86,6 +86,14 @@ separate from it2ag's autolaunch script.
 - Each row shows a color-coded agent badge and a status: **running**, **done**,
   or **idle**. A row with no detected agent shows its session name only.
 - Click a row to jump to that terminal pane; a done row's mark clears on click.
+- New panels display the existing session list while it refreshes in the
+  background, so opening another window does not wait for a full scan.
+- Each window's panel highlights only that window's active pane. A panel
+  connects its focus marker the first time its window is the active iTerm2
+  window; clicking inside the panel also connects it. The same WebView
+  remembers its connection across page reloads. Terminal-pane clicks then
+  update the marker automatically.
+  Switching windows keeps the other panels' markers and scroll positions.
 - Right-click a card for its menu: label it, focus it, or mark it read.
   Labels show as a chip in the card's top row and last until the session or
   the monitor exits.

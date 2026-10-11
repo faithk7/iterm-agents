@@ -45,6 +45,29 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   .search-box:focus { border-color: #569cd6; }
   .search-box::placeholder { color: #666; }
+  .focus-hint {
+    display: block;
+    width: 100%;
+    margin-bottom: 8px;
+    padding: 5px 8px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: transparent;
+    color: #569cd6;
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .focus-hint[hidden] { display: none; }
+  /* WebKit resolves :window-inactive from this WebView's own NSWindow, so the
+     probe's scrollbar width reveals whether the panel's window is key. */
+  #owner-probe {
+    position: fixed; left: -100px; top: 0;
+    width: 50px; height: 50px; overflow: scroll;
+  }
+  #owner-probe::-webkit-scrollbar { width: 1px; }
+  #owner-probe::-webkit-scrollbar:window-inactive { width: 2px; }
 
   /* Hand is scoped to card groups: a stale hit-test after click resolves to
      the group, keeping the pointer a hand over cards only, not page margins. */
@@ -212,12 +235,79 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   <input type="text" class="search-box" id="search"
          placeholder="Search by name, repo, branch..."
          oninput="filterSessions()">
+  <button class="focus-hint" id="focus-hint" onclick="bindPanelWindow()"
+          aria-live="polite">Click here to enable the blue focus marker</button>
+  <div id="owner-probe" aria-hidden="true"><div style="height: 100px"></div></div>
   <div id="sessions"></div>
   <div class="count" id="count"></div>
 
   <script>
     let allSessions = [];
     let focusedIndex = -1;
+    // The browsing-context name survives reloads and belongs to this WebView.
+    // localStorage/cookies would share ownership between different panels.
+    const panelWindowPrefix = 'iterm-agents:window:';
+    let panelWindowId = typeof window.name === 'string' &&
+      window.name.startsWith(panelWindowPrefix)
+      ? window.name.slice(panelWindowPrefix.length) : '';
+    document.getElementById('focus-hint').hidden = !!panelWindowId;
+    let bindingWindow = null;
+    let panelFocusEpoch = 0;
+    let eventsSource = null;
+
+    function panelUrl(path) {
+      return panelWindowId ? path + '?window=' + encodeURIComponent(panelWindowId) : path;
+    }
+
+    async function bindPanelWindow(stillOwner) {
+      if (panelWindowId) return true;
+      if (bindingWindow) return bindingWindow;
+      const hint = document.getElementById('focus-hint');
+      hint.textContent = 'Connecting focus marker…';
+      const epoch = panelFocusEpoch;
+      bindingWindow = (async () => {
+        try {
+          const res = await fetch('/api/panel-window');
+          if (!res.ok) return false;
+          const data = await res.json();
+          // WKWebView's hasFocus() can stay false after a real click. A blur
+          // during the handshake, rather than that flag, invalidates ownership.
+          if (!data.window_id || epoch !== panelFocusEpoch ||
+              (stillOwner && !stillOwner())) return false;
+          panelWindowId = data.window_id;
+          window.name = panelWindowPrefix + panelWindowId;
+          hint.hidden = true;
+          connectSSE();
+          loadSessions();
+          return true;
+        } catch(e) {
+          return false;
+        }
+      })();
+      try {
+        return await bindingWindow;
+      } finally {
+        bindingWindow = null;
+        if (!panelWindowId) hint.textContent = 'Focus connection failed. Click here to retry.';
+      }
+    }
+
+    // Unlike hasFocus(), this needs no click: it reads only whether the
+    // panel's own window is key, so other panels' windows cannot claim it.
+    function ownerWindowIsKey() {
+      const probe = document.getElementById('owner-probe');
+      // WebKit re-resolves the scrollbar style only when it is rebuilt.
+      probe.style.overflow = 'hidden';
+      void probe.offsetWidth;
+      probe.style.overflow = '';
+      return probe.offsetWidth - probe.clientWidth === 1;
+    }
+    function bindIfOwnerWindowKey() {
+      if (!panelWindowId && !bindingWindow && ownerWindowIsKey()) {
+        bindPanelWindow(ownerWindowIsKey);
+      }
+    }
+    setInterval(bindIfOwnerWindowKey, 250);
 
     // Auto-focus search input when the Toolbelt panel gets focus.
     // Use multiple strategies since embedded WebViews may not fire focus events.
@@ -238,6 +328,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }, 200);
 
     document.addEventListener('keydown', (e) => {
+      bindPanelWindow();
       // The context menu and label editor handle their own keys.
       if (ctxMenu || labelEditorOpen) return;
       const items = getAgentElements();
@@ -298,6 +389,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     let pressedAt = 0;
     let activatedOnPress = false;
     document.addEventListener('pointerdown', (e) => {
+      bindPanelWindow();
       pointerDown = true;
       const seq = ++pointerSeq;
       // Window changes can interrupt pointerup/click in the Toolbelt WebView.
@@ -323,7 +415,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       pressedY = '';
       activatedOnPress = false;
     }, true);
-    window.addEventListener('blur', () => { pointerDown = false; });
+    window.addEventListener('blur', () => {
+      pointerDown = false;
+      panelFocusEpoch++;
+    });
 
     // Collapsed repo keys; persists across the per-second re-render.
     const collapsedRepos = new Set();
@@ -519,13 +614,32 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }
 
     let loadingSessions = false;
+    let reloadSessionsPending = false;
 
     async function loadSessions(force) {
-      if (loadingSessions) return;
+      if (loadingSessions) {
+        reloadSessionsPending = true;
+        return;
+      }
       loadingSessions = true;
+      const requestedWindowId = panelWindowId;
       try {
-        const res = await fetch('/api/sessions');
-        allSessions = await res.json();
+        const url = panelUrl('/api/sessions');
+        const res = await fetch(url + (url.includes('?') ? '&' : '?') + 'cached=1');
+        const sessions = await res.json();
+        // An unbound request may finish after the first-click handshake.
+        if (requestedWindowId !== panelWindowId) return;
+        // Old rows can predate this window. Only the native window snapshot
+        // can invalidate its binding; never guess from a missing cached row.
+        if (panelWindowId && res.headers?.get('X-Agents-Window') === 'missing') {
+          panelWindowId = '';
+          window.name = '';
+          const hint = document.getElementById('focus-hint');
+          hint.hidden = false;
+          hint.textContent = 'Click here to enable the blue focus marker';
+          connectSSE();
+        }
+        allSessions = sessions;
         filterSessions(force);
       } catch(e) {
         lastRenderedInput = '';
@@ -534,6 +648,12 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           '<div class="no-results">Failed to load sessions<br>' + esc(String(e)) + '</div>';
       } finally {
         loadingSessions = false;
+        // Binding or a scan update can arrive during the first fetch. Retry
+        // immediately instead of leaving a new panel blank until the next poll.
+        if (reloadSessionsPending || requestedWindowId !== panelWindowId) {
+          reloadSessionsPending = false;
+          loadSessions();
+        }
       }
     }
 
@@ -719,6 +839,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }
 
     async function focusSession(sessionId) {
+      // Bind the source panel before a card click can activate another window.
+      if (!panelWindowId) await bindPanelWindow();
       try {
         await fetch('/api/focus?session=' + encodeURIComponent(sessionId));
       } catch(e) {}
@@ -732,11 +854,15 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     // SSE: iTerm2 focus changes refresh the marker; Cmd+Shift+M focuses search.
     function connectSSE() {
-      const es = new EventSource('/api/events');
+      if (eventsSource) eventsSource.close();
+      const es = new EventSource(panelUrl('/api/events'));
+      eventsSource = es;
       // The event carries the focused session ids — toggle the marker in
       // place; a refetch would add a needless round trip to a fast path.
       es.addEventListener('focus-changed', (e) => {
-        const ids = new Set(JSON.parse(e.data).focused || []);
+        const data = JSON.parse(e.data);
+        if (eventsSource !== es || !panelWindowId || data.window_id !== panelWindowId) return;
+        const ids = new Set(data.focused || []);
         allSessions.forEach(s => { s.focused = ids.has(s.id); });
         document.querySelectorAll('.agent').forEach(el =>
           el.classList.toggle('current', ids.has(el.dataset.session)));
@@ -744,15 +870,21 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         renderSessions(filteredSessions());
       });
       es.addEventListener('focus-search', () => {
+        if (eventsSource !== es || !panelWindowId) return;
         const search = document.getElementById('search');
         search.focus();
         search.select();
         focusedIndex = -1;
         clearFocus(getAgentElements());
       });
+      es.addEventListener('sessions-changed', () => {
+        if (eventsSource === es) loadSessions();
+      });
       es.onerror = () => {
+        if (eventsSource !== es) return;
         es.close();
-        setTimeout(connectSSE, 3000);
+        eventsSource = null;
+        setTimeout(() => { if (!eventsSource) connectSSE(); }, 3000);
       };
     }
     connectSSE();
