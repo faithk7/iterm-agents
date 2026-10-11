@@ -4,7 +4,7 @@
 
 ![iterm-agents：五种智能体，一个面板。查看运行状态，跳转到已完成的会话。](docs/promo-iterm-agents.png)
 
-一个 iTerm2 工具栏（Toolbelt）面板，用于监控终端会话中的编程智能体：Claude Code、Codex、Cursor Agent、Devin 和 Kimi Code。你可以一眼看到哪个会话还在处理当前任务、哪个刚刚完成，再点击跳转到对应的终端窗格。
+在 iTerm2 工具栏（Toolbelt）中统览 Claude Code、Codex、Cursor Agent、Devin 和 Kimi Code 的会话状态；点击直达对应窗格，随时接手下一步
 
 ![完整的 iTerm2 窗口：左侧为终端窗格，右侧为 Agents 面板](docs/iterm-window.png)
 
