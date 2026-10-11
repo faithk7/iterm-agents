@@ -187,6 +187,10 @@ def _get_codex_active_pids() -> set[int] | None:
             ["pmset", "-g", "assertions"],
             capture_output=True,
             text=True,
+            # Device names in unrelated assertions can contain non-UTF-8 bytes.
+            # Preserve the ASCII PID/turn signal instead of losing the whole scan.
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
         )
         if result.returncode != 0:

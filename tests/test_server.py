@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
-from iterm_agents.detector import AgentType, GitInfo
+from iterm_agents.detector import AgentType, GitInfo, ProcessInfo, detect_agents
+from iterm_agents.models import SessionRow
 from iterm_agents.server import DEFAULT_HOST, AgentMonitorServer, _resolve_bound_port
 
 
@@ -640,6 +644,49 @@ class TestAgentMonitorServer:
         clock["now"] = 16.0
         assert await states() == ["awaiting_user"] * 3
         assert scan.await_count == 5
+
+    async def test_codex_completes_with_invalid_bytes_in_pmset_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = {"now": 10.0}
+        monkeypatch.setattr(
+            "iterm_agents.server.time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        monkeypatch.setattr(
+            "iterm_agents.detector._build_process_table",
+            lambda _pids: {
+                10: ProcessInfo(pid=10, ppid=1, command="zsh"),
+                20: ProcessInfo(pid=20, ppid=10, command="codex"),
+            },
+        )
+        output = b'pid 411(WindowServer): named: "Trackpad \xe9"\n'
+        run = subprocess.run
+
+        def pmset(_args: object, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            data = output
+            if clock["now"] == 10.0:
+                data = b'pid 20(codex): named: "Codex is running an active turn"\n'
+            return run(
+                [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({data!r})"], **kwargs
+            )
+
+        monkeypatch.setattr("iterm_agents.detector.subprocess.run", pmset)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        session = SimpleNamespace(session_id="s-1", name="")
+        server._screen_text = AsyncMock(
+            return_value="\u203a Ask Codex to do anything\n? for shortcuts"
+        )
+
+        async def scan() -> list[SessionRow]:
+            [agent] = await asyncio.to_thread(detect_agents, {10})
+            row = await server._session_row(10, session, "", agent, False, None)
+            return [row]
+
+        monkeypatch.setattr(server, "_scan_sessions", scan)
+        for now, expected in ((10.0, "running"), (11.0, "running"), (14.0, "awaiting_user")):
+            clock["now"] = now
+            response = await server._handle_sessions(None)
+            assert json.loads(response.text)[0]["agent_state"] == expected
 
     async def test_failed_scan_keeps_running_and_resets_confirmation(
         self, monkeypatch: pytest.MonkeyPatch

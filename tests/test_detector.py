@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from unittest.mock import patch
+
+import pytest
 
 from iterm_agents.detector import (
     AgentState,
@@ -237,6 +241,21 @@ class TestDetectCodexState:
 
 
 class TestGetCodexActivePids:
+    @pytest.mark.parametrize("active", [False, True])
+    def test_invalid_utf8_in_unrelated_assertion_does_not_hide_codex(self, active: bool) -> None:
+        # pmset can emit a device name containing a legacy-encoded byte.
+        # Exercise subprocess decoding, rather than mocking an already decoded string.
+        output = b'pid 411(WindowServer): named: "Qu\xe9s Trackpad"\n'
+        if active:
+            output += b'pid 100(codex): named: "Codex is running an active turn"\n'
+        run = subprocess.run
+        command = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({output!r})"]
+        with patch(
+            "iterm_agents.detector.subprocess.run",
+            side_effect=lambda _args, **kwargs: run(command, **kwargs),
+        ):
+            assert _get_codex_active_pids() == ({100} if active else set())
+
     def test_parses_active_pid(self) -> None:
         pmset_output = (
             "Listed by owning process:\n"
