@@ -3,30 +3,41 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+
+from iterm_agents.models import SessionRow
 
 AWAITING_USER_STATE = "awaiting_user"
 CODEX_IDLE_CONFIRM_SECONDS = 3.0
 
 
 class SessionStateTracker:
-    """Tracks recent agent activity to surface completion acknowledgements."""
+    """Turn fresh observations into per-session completion marks and labels.
+
+    A running-to-idle transition marks a turn done until it is acknowledged
+    or runs again. Codex must stay idle across fresh scans for the confirmation
+    interval. Unknown observations and failed scans interrupt that interval.
+    """
 
     def __init__(self) -> None:
         self._last_agent_states: dict[str, str] = {}
         self._awaiting_user_sessions: set[str] = set()
         self._labels: dict[str, str] = {}
         self._idle_since: dict[str, float] = {}
-        self._agent_keys: dict[str, tuple[str, object]] = {}
+        self._agent_keys: dict[str, tuple[str, int | None]] = {}
 
     def apply(
         self,
-        sessions: list[dict[str, Any]],
+        sessions: list[SessionRow],
         *,
         fresh: bool = True,
         observed_at: float | None = None,
-    ) -> list[dict[str, Any]]:
-        """Decorate rows; only fresh observations can advance completion state."""
+    ) -> list[SessionRow]:
+        """Decorate rows in place and return the same list.
+
+        Callers pass copies of cached observations. Set fresh only for a new
+        successful scan, and observed_at to that scan's monotonic timestamp;
+        repeated reads of the cache must not confirm completion.
+        """
         now = time.monotonic() if observed_at is None else observed_at
         active_session_ids = {
             str(session.get("id", "")) for session in sessions if session.get("id") is not None

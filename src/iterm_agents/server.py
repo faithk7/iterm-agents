@@ -22,15 +22,12 @@ import iterm2.session
 import iterm2.tool
 from aiohttp import web
 
-from iterm_agents.detector import (
-    AgentInfo,
-    AgentState,
-    AgentType,
-    GitInfo,
+from iterm_agents.detector import detect_agents
+from iterm_agents.git_info import get_git_info
+from iterm_agents.models import AgentInfo, AgentState, AgentType, GitInfo, SessionRow
+from iterm_agents.screen_signals import (
     cursor_activity_signature,
     cursor_turn_is_live,
-    detect_agents,
-    get_git_info,
     screen_shows_active_turn,
 )
 from iterm_agents.session_state import SessionStateTracker
@@ -66,7 +63,17 @@ async def _session_variable(session: iterm2.session.Session, name: str) -> objec
 
 
 class AgentMonitorServer:
-    """Manages the aiohttp server and iTerm2 Toolbelt integration."""
+    """Coordinate panel requests, session scans, and iTerm2 focus events.
+
+    Shared state belongs to the iTerm2 event loop. Blocking process and Git
+    reads run in worker threads and return values without mutating it.
+    Scans are serialized, but focus events can patch the layout while a
+    scan awaits RPCs; the focus epoch prevents older snapshots winning.
+    """
+
+    _SCAN_CACHE_TTL = 0.9
+    _SCAN_RPC_CONCURRENCY = 4
+    _GIT_CACHE_TTL = 5.0
 
     def __init__(
         self,
@@ -78,6 +85,7 @@ class AgentMonitorServer:
         self.connection = connection
         self.host = host
         self.port = port
+        # SSE and WebSocket panels share routing and window ownership.
         self._sse_clients: weakref.WeakSet[web.StreamResponse] = weakref.WeakSet()
         self._sse_window_ids: weakref.WeakKeyDictionary[web.StreamResponse, str] = (
             weakref.WeakKeyDictionary()
@@ -85,12 +93,15 @@ class AgentMonitorServer:
         self._sse_focus_ids: weakref.WeakKeyDictionary[web.StreamResponse, str] = (
             weakref.WeakKeyDictionary()
         )
+        # Cached rows contain observations; completion and labels are added
+        # to response copies so acknowledgements also affect cached polls.
         self._session_state = SessionStateTracker()
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
         self._scan_rpc_gate = asyncio.Semaphore(self._SCAN_RPC_CONCURRENCY)
-        self._scan_cache: tuple[float, list[dict[str, str | int]]] = (0.0, [])
+        self._scan_cache: tuple[float, list[SessionRow]] = (0.0, [])
         self._scan_refresh_task: asyncio.Task[None] | None = None
+        # None means the window layout has not yet been observed.
         self._window_ids: set[str] | None = None
         self._toolbelt_ready_windows: set[str] = set()
         self._git_cache: dict[str, tuple[float, GitInfo]] = {}
@@ -101,6 +112,7 @@ class AgentMonitorServer:
         self._focus_refresh_pending = False
         self._focus_epoch = 0
         self._pending_focus_id: str | None = None
+        # Remember selected tabs and panes even in inactive windows.
         self._iterm_app: iterm2.app.App | None = None
         self._focused_by_window: dict[str, str] = {}
         self._active_sessions_by_tab: dict[str, str] = {}
@@ -443,7 +455,8 @@ class AgentMonitorServer:
                 continue
             try:
                 await self._send_panel_event(
-                    client, "focus-changed",
+                    client,
+                    "focus-changed",
                     {"window_id": window_id, "focused": [session_id] if session_id else []},
                 )
             except Exception:
@@ -550,13 +563,12 @@ class AgentMonitorServer:
     async def _handle_diagnostics(self, request: web.Request) -> web.Response:
         """Local transport counts, without session names or terminal content."""
         sockets = sum(isinstance(client, web.WebSocketResponse) for client in self._sse_clients)
-        return web.json_response({
-            "event_streams": len(self._sse_clients) - sockets,
-            "websocket_panels": sockets,
-        })
-
-    _SCAN_CACHE_TTL = 0.9
-    _SCAN_RPC_CONCURRENCY = 4
+        return web.json_response(
+            {
+                "event_streams": len(self._sse_clients) - sockets,
+                "websocket_panels": sockets,
+            }
+        )
 
     async def _handle_sessions(self, request: web.Request | None) -> web.Response:
         """Serve the latest scan; concurrent or rapid polls share one scan.
@@ -613,7 +625,7 @@ class AgentMonitorServer:
         """Decorate a completed snapshot without advancing cached observations."""
         timestamp, raw = self._scan_cache
         sessions = self._session_state.apply(
-            [dict(s) for s in raw], fresh=fresh, observed_at=timestamp
+            [s.copy() for s in raw], fresh=fresh, observed_at=timestamp
         )
         window_id = request.query.get("window", "") if request is not None else ""
         focused_id = self._focused_by_window.get(window_id)
@@ -628,7 +640,7 @@ class AgentMonitorServer:
             sessions, headers={"X-Agents-Window": owner, "Cache-Control": "no-store"}
         )
 
-    async def _scan_sessions(self) -> list[dict[str, str | int]]:
+    async def _scan_sessions(self) -> list[SessionRow]:
         """Snapshot every session: variables, agent state, git, screen hints."""
         focus_epoch = self._focus_epoch
         iterm2_app = await iterm2.app.async_get_app(self.connection)
@@ -664,8 +676,8 @@ class AgentMonitorServer:
                 session_map[pid] = session
                 session_paths[pid] = path if isinstance(path, str) else ""
 
-        # Detect agents and map to sessions. Off the event loop: it spawns
-        # `ps`/`pmset` subprocesses that would stall focus requests.
+        # Native process reads and fallback subprocesses are blocking, so
+        # keep detection off the event loop to let focus requests proceed.
         session_pids = set(session_map.keys())
         agents = await asyncio.to_thread(detect_agents, session_pids) if session_pids else []
         agent_by_session_pid: dict[int, AgentInfo] = {}
@@ -728,8 +740,6 @@ class AgentMonitorServer:
                 return await session.async_get_variable(name)
             return await _session_variable(session, name)
 
-    _GIT_CACHE_TTL = 5.0
-
     async def _git_for(self, path: str) -> GitInfo | None:
         """Repo info for a path, cached briefly; sessions rarely move."""
         now = time.monotonic()
@@ -749,7 +759,7 @@ class AgentMonitorServer:
         focused: bool,
         git: GitInfo | None,
         window_id: str = "",
-    ) -> dict[str, str | int]:
+    ) -> SessionRow:
         """Build one session's API row, upgrading idle agents via the screen."""
         agent_state = agent.state.value if agent else ""
         if agent is not None and agent.state in (AgentState.IDLE, AgentState.UNKNOWN):

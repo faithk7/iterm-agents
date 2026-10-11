@@ -1,9 +1,8 @@
-"""Agent process detection.
+"""Classify agent processes and infer activity from their descendants.
 
 Derived from it2ag by mkusaka (https://github.com/mkusaka/it2ag), GPL-2.0.
-Claude Code and Codex keep that project's signals. Cursor Agent, Devin CLI,
-and Kimi Code are matched from the executable path, because those programs
-do not share Claude's or Codex's process names.
+Process snapshots, screen signals, and Git metadata live in separate modules.
+Claude Code and Codex retain it2ag's process and power-assertion signals.
 """
 
 from __future__ import annotations
@@ -12,83 +11,40 @@ import contextlib
 import os
 import subprocess
 from collections import deque
-from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
 
-from git import Repo
+from iterm_agents.git_info import get_git_info
+from iterm_agents.models import AgentInfo, AgentState, AgentType, GitInfo, ProcessInfo
+from iterm_agents.processes import build_process_table as _build_process_table
+from iterm_agents.screen_signals import (
+    CURSOR_FOOTER_STALE_SECONDS,
+    codex_screen_shows_active_turn,
+    cursor_activity_signature,
+    cursor_turn_is_live,
+    devin_screen_shows_active_turn,
+    kimi_screen_shows_active_turn,
+    screen_shows_active_turn,
+)
 
-
-class AgentType(Enum):
-    """The coding agents this monitor recognizes."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    CURSOR = "cursor"
-    DEVIN = "devin"
-    KIMI = "kimi"
-
-
-class AgentState(Enum):
-    """Whether an agent is mid-turn, waiting, or could not be observed."""
-
-    RUNNING = "running"
-    IDLE = "idle"
-    UNKNOWN = "unknown"
-
-
-@dataclass
-class ProcessInfo:
-    """A process-table row: pid, parent pid, and the full command line."""
-
-    pid: int
-    ppid: int
-    command: str
-
-
-@dataclass
-class AgentInfo:
-    """A detected agent process and the iTerm2 session shell it belongs to."""
-
-    agent_type: AgentType
-    state: AgentState
-    pid: int
-    session_pid: int | None = None
-
+# Keep existing public detector imports working while implementation lives
+# in modules that own each responsibility. New code imports those directly.
+__all__ = [
+    "CURSOR_FOOTER_STALE_SECONDS",
+    "AgentInfo",
+    "AgentState",
+    "AgentType",
+    "GitInfo",
+    "ProcessInfo",
+    "codex_screen_shows_active_turn",
+    "cursor_activity_signature",
+    "cursor_turn_is_live",
+    "detect_agents",
+    "devin_screen_shows_active_turn",
+    "get_git_info",
+    "kimi_screen_shows_active_turn",
+    "screen_shows_active_turn",
+]
 
 _BUSY_CHILD_NAMES = frozenset({"caffeinate", "sandbox-exec", "bwrap", "codex-linux-sandbox"})
-
-
-def _build_process_table() -> dict[int, ProcessInfo]:
-    """Build a process table from ps output.
-
-    `command` includes arguments. Cursor Agent's on-disk launcher is a shell
-    wrapper that execs a private `node` binary, so the executable basename
-    alone is not enough to tell it from any other Node process.
-    """
-    result = subprocess.run(
-        ["ps", "-axww", "-o", "pid,ppid,command"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("iterm-agents: process scan failed")
-
-    table: dict[int, ProcessInfo] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) < 3:
-            continue
-        try:
-            pid = int(parts[0])
-            ppid = int(parts[1])
-        except ValueError:
-            continue
-        table[pid] = ProcessInfo(pid=pid, ppid=ppid, command=parts[2].strip())
-    if not table:
-        raise RuntimeError("iterm-agents: process scan returned no valid rows")
-    return table
 
 
 def _build_children(table: dict[int, ProcessInfo]) -> dict[int, list[ProcessInfo]]:
@@ -269,152 +225,6 @@ def _detect_codex_state(children: dict[int, list[ProcessInfo]], pid: int) -> Age
     return AgentState.IDLE
 
 
-# A frozen "Running N tokens" footer is a finished turn whose status line
-# never cleared. Real generation changes this signature every few seconds.
-CURSOR_FOOTER_STALE_SECONDS = 30.0
-
-
-def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
-    """True when the agent's composer footer shows a live turn."""
-    if agent_type is AgentType.CURSOR:
-        return cursor_activity_signature(screen_text) is not None
-    if agent_type is AgentType.DEVIN:
-        return devin_screen_shows_active_turn(screen_text)
-    if agent_type is AgentType.CODEX:
-        return codex_screen_shows_active_turn(screen_text)
-    if agent_type is AgentType.KIMI:
-        return kimi_screen_shows_active_turn(screen_text)
-    return False
-
-
-def codex_screen_shows_active_turn(screen_text: str) -> bool:
-    """True while Codex's status line shows the interrupt hint.
-
-    A running turn draws ``Working (<elapsed> • esc to interrupt)`` on the
-    line above the composer. The hint is redrawn in place, so it only exists
-    on screen while the turn is live. Anchoring it to the composer prompt
-    or the shortcuts footer below keeps transcript echoes of the same
-    string from matching; not every composer variant draws the same
-    prompt character.
-    """
-    lines = screen_text.splitlines()
-    for index in range(len(lines) - 1, max(len(lines) - 13, -1), -1):
-        if "esc to interrupt)" not in lines[index]:
-            continue
-        for lookahead in range(index + 1, min(index + 9, len(lines))):
-            stripped = lines[lookahead].lstrip()
-            if stripped.startswith("\u203a") or "? for shortcuts" in stripped:
-                return True
-    return False
-
-
-_KIMI_BUSY_LABELS = (
-    "Working",
-    "Prompting",
-    "Orchestrating",
-    "Queued",
-    "Rate limited",
-    "Thinking",
-)
-
-_KIMI_BUSY_NEEDLES = tuple(
-    f"{label}{suffix}" for label in _KIMI_BUSY_LABELS for suffix in ("…", "...")
-)
-
-
-def kimi_screen_shows_active_turn(screen_text: str) -> bool:
-    """True while Kimi's status line shows an in-progress label.
-
-    A live turn draws ``Working…`` (or Prompting/Orchestrating/Queued/
-    Rate limited/Thinking, all ending in an ellipsis) above the composer
-    box;
-    while a tool runs the label is empty and the status line shows only
-    the spinner and its rotating `` · Tip:`` hint. Finished turns end
-    with ``Completed.``, ``Failed.`` and friends. The status line is
-    redrawn in place, so it only exists on screen while the turn is
-    live. Anchoring it to the composer box underneath keeps transcript
-    echoes of the same label from matching.
-    """
-    lines = screen_text.splitlines()
-    for index in range(len(lines) - 1, max(len(lines) - 24, -1), -1):
-        line = lines[index]
-        if "· Tip:" not in line and not any(needle in line for needle in _KIMI_BUSY_NEEDLES):
-            continue
-        for lookahead in range(index + 1, min(index + 16, len(lines))):
-            if lines[lookahead].lstrip().startswith(("╭", "│")):
-                return True
-    return False
-
-
-def devin_screen_shows_active_turn(screen_text: str) -> bool:
-    """True while Devin's status line shows the interrupt hint.
-
-    A running turn draws ``<activity> · <elapsed> (esc twice to interrupt)``
-    on the line directly above the input box. The hint is redrawn in place,
-    so it only exists on screen while the turn is live. Anchoring it to the
-    box border underneath keeps transcript echoes of the same string from
-    matching.
-    """
-    lines = screen_text.splitlines()
-    for index in range(len(lines) - 2, max(len(lines) - 12, -1), -1):
-        line = lines[index]
-        if "esc" in line and "to interrupt)" in line and lines[index + 1].lstrip().startswith("──"):
-            return True
-    return False
-
-
-def cursor_activity_signature(screen_text: str) -> str | None:
-    """Stable id of an in-progress Cursor turn, or None when the footer is idle.
-
-    The live signal is ``ctrl+c to stop`` inside the composer box. A
-    ``Running N tokens`` line left above that box after the turn ends does
-    not count. The signature is the visible screen with insignificant
-    spacing dropped. The animated spinner stays in it: during a quiet
-    thinking or reconnect stall it is the only thing still moving, and a
-    leftover footer frozen after the turn ends does not move at all.
-    """
-    footer = _cursor_footer_lines(screen_text)
-    if not any("ctrl+c to stop" in line for line in footer):
-        return None
-    return _normalize_cursor_screen(screen_text)
-
-
-def _normalize_cursor_screen(screen_text: str) -> str:
-    """Drop insignificant spacing."""
-    lines = (" ".join(line.split()) for line in screen_text.splitlines())
-    return "\n".join(line for line in lines if line)
-
-
-def cursor_turn_is_live(
-    signature: str | None,
-    previous: str | None,
-    age_seconds: float,
-    *,
-    stale_after: float = CURSOR_FOOTER_STALE_SECONDS,
-) -> bool:
-    """A footer that still says stop, but has not changed, is a finished turn."""
-    if signature is None:
-        return False
-    if previous != signature:
-        return True
-    return age_seconds < stale_after
-
-
-def _cursor_footer_lines(screen_text: str) -> list[str]:
-    """The composer box and the status line directly above it."""
-    lines = [line.rstrip() for line in screen_text.splitlines()]
-    box = next((index for index, line in enumerate(lines) if "▄▄▄" in line), None)
-    if box is None:
-        return [line.strip() for line in lines if line.strip()][-8:]
-    start = box
-    previous = box - 1
-    while previous >= 0 and not lines[previous].strip():
-        previous -= 1
-    if previous >= 0:
-        start = previous
-    return [line.strip() for line in lines[start:] if line.strip()]
-
-
 def _detect_busy_child_state(children: dict[int, list[ProcessInfo]], pid: int) -> AgentState:
     """Cursor Agent, Devin, and Kimi Code have no published turn signal.
 
@@ -456,7 +266,7 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
         session_pids: If provided, only return agents that are descendants
                       of these PIDs (iTerm2 session shell PIDs).
     """
-    table = _build_process_table()
+    table = _build_process_table(session_pids)
     children = _build_children(table)
     agents: list[AgentInfo] = []
     # Lazily fetched: `pmset` spawns a subprocess, so skip it entirely on
@@ -500,51 +310,3 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
         )
 
     return agents
-
-
-@dataclass
-class GitInfo:
-    """Repo display info: name, checked-out branch, and main repo path."""
-
-    repo: str
-    branch: str
-    root_repo: str
-
-
-def get_git_info(path: str) -> GitInfo:
-    """Get git repo name, branch, and root repo path for a directory.
-
-    For worktrees, root_repo points to the main repository's toplevel,
-    so sessions in different worktrees of the same repo get grouped together.
-    """
-    empty = GitInfo(repo="", branch="", root_repo="")
-    if not path or not os.path.isdir(path):
-        return empty
-    try:
-        repo = Repo(path, search_parent_directories=True)
-    except Exception:
-        return empty
-
-    try:
-        toplevel = str(repo.working_tree_dir or "")
-        repo_name = os.path.basename(toplevel) if toplevel else ""
-
-        branch = ""
-        if not repo.head.is_detached:
-            branch = repo.active_branch.name
-
-        # Resolve root repo for worktree grouping.
-        # repo.common_dir points to the shared .git dir (same for all worktrees).
-        # For normal repos: /path/to/repo/.git
-        # For worktrees: /path/to/main-repo/.git (the main repo's git dir)
-        root_repo = toplevel
-        common_dir = Path(repo.common_dir).resolve()
-        if common_dir != Path(repo.git_dir).resolve():
-            # This is a worktree; common_dir is the main repo's .git
-            root_repo = str(common_dir.parent)
-            # Use the main repo's name, not the worktree directory name
-            repo_name = os.path.basename(root_repo)
-
-        return GitInfo(repo=repo_name, branch=branch, root_repo=root_repo)
-    except Exception:
-        return empty

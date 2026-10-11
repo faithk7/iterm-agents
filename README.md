@@ -255,6 +255,8 @@ uv run mypy src/         # 类型检查（仅 src/；测试使用模拟对象）
 
 `uv sync` 以可编辑模式安装项目，修改 `src/` 中的代码后，重启监控程序即可生效。
 
+模块职责、数据流及缓存和焦点状态规则见 [Python 架构说明](docs/architecture.md)。
+
 ## 致谢
 
 本项目衍生自 [@mkusaka](https://github.com/mkusaka) 的 [it2ag](https://github.com/mkusaka/it2ag)。复用了其进程扫描、工具栏面板、会话列表、Git 和 worktree 分组、点击聚焦，以及 Claude Code 和 Codex 的活动信号；Cursor Agent、Devin 和 Kimi Code 的检测为本项目新增。详见 [NOTICE](NOTICE)。

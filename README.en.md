@@ -344,6 +344,9 @@ uv run mypy src/         # typecheck (src/ only; tests use fakes)
 `uv sync` installs the project editable, so code in `src/` is picked up after
 restarting the monitor.
 
+See [Python architecture](docs/architecture.md) for module responsibilities,
+the observation-to-display flow, and cache/focus state rules.
+
 ## Acknowledgements
 
 [it2ag](https://github.com/mkusaka/it2ag) by
