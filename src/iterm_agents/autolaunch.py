@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -11,7 +12,7 @@ AUTO_LAUNCH_SCRIPT_NAME = "iterm-agents.py"
 
 LaunchMode = Literal["auto", "binary", "project"]
 
-BINARY_AUTO_LAUNCH_SCRIPT = """#!/usr/bin/env python3
+BINARY_AUTO_LAUNCH_TEMPLATE = """#!/usr/bin/env python3
 from __future__ import annotations
 
 import os
@@ -19,8 +20,13 @@ import pathlib
 import shutil
 import subprocess
 
+INSTALLED_BINARY = pathlib.Path({binary_path!r})
+
 
 def _resolve_binary() -> str:
+    if INSTALLED_BINARY.is_file():
+        return str(INSTALLED_BINARY)
+
     binary = shutil.which("iterm-agents")
     if binary is not None:
         return binary
@@ -92,7 +98,7 @@ def build_autolaunch_script(
 ) -> tuple[str, Literal["binary", "project"]]:
     """Render the wrapper script for the requested launch mode."""
     if launch_mode == "binary":
-        return BINARY_AUTO_LAUNCH_SCRIPT, "binary"
+        return _build_binary_autolaunch_script(), "binary"
 
     resolved_project_root = project_root
     if launch_mode == "auto":
@@ -106,7 +112,13 @@ def build_autolaunch_script(
             "project",
         )
 
-    return BINARY_AUTO_LAUNCH_SCRIPT, "binary"
+    return _build_binary_autolaunch_script(), "binary"
+
+
+def _build_binary_autolaunch_script() -> str:
+    """Remember the installing environment, including venvs outside PATH."""
+    binary_path = Path(sysconfig.get_path("scripts")) / "iterm-agents"
+    return BINARY_AUTO_LAUNCH_TEMPLATE.format(binary_path=str(binary_path))
 
 
 def install_autolaunch(
