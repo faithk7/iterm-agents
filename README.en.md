@@ -24,8 +24,8 @@ finished, then click through to that pane.
 ## What you get
 
 - **An Agents panel in every window** — opened in each existing window at
-  launch and in every window you open afterwards; a toolbelt you hide by hand
-  stays hidden.
+  launch and in each new window when you first activate it; background scans
+  never switch window focus, and a toolbelt you hide by hand stays hidden.
 - **Live state per session** — `running` while a turn is live, `done` when one
   just finished, `idle` otherwise.
 - **Repo grouping** — sessions group under their git repo, with worktrees

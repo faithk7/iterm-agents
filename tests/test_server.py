@@ -126,8 +126,10 @@ class _GatedScanSession(_ScanSession):
 
 class _ScanTab:
     def __init__(
-        self, sessions: list[_ScanSession], active_session_id: str | None = None
+        self, sessions: list[_ScanSession], active_session_id: str | None = None,
+        tab_id: str = "",
     ) -> None:
+        self.tab_id = tab_id or f"tab-{id(self)}"
         self.sessions = sessions
         self.active_session_id = active_session_id
 
@@ -214,6 +216,297 @@ class TestResolveBoundPort:
 
 
 class TestAgentMonitorServer:
+    async def test_websocket_events_are_isolated_and_reconnect_restores_marker(self) -> None:
+        from aiohttp import ClientSession, web
+        from aiohttp.test_utils import TestServer
+
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._focused_by_window = {"w1": "s-1", "w2": "s-2"}
+        app = web.Application()
+        app.router.add_get("/api/ws", server._handle_ws)
+        app.router.add_get("/api/diagnostics", server._handle_diagnostics)
+        async with TestServer(app) as site, ClientSession() as client:
+            first = await client.ws_connect(site.make_url("/api/ws?window=w1"))
+            second = await client.ws_connect(site.make_url("/api/ws?window=w2"))
+            assert await first.receive_json(timeout=1) == {
+                "event": "focus-changed", "data": {"window_id": "w1", "focused": ["s-1"]},
+            }
+            assert await second.receive_json(timeout=1) == {
+                "event": "focus-changed", "data": {"window_id": "w2", "focused": ["s-2"]},
+            }
+            server._focused_by_window["w1"] = "s-3"
+            await server._broadcast_focus()
+            assert (await first.receive_json(timeout=1))["data"]["focused"] == ["s-3"]
+            with pytest.raises(asyncio.TimeoutError):
+                await second.receive_json(timeout=0.02)
+            await server._broadcast_sse("sessions-changed")
+            for socket in (first, second):
+                assert await socket.receive_json(timeout=1) == {
+                    "event": "sessions-changed", "data": {},
+                }
+                await socket.close()
+            async with client.get(site.make_url("/api/diagnostics")) as response:
+                assert await response.json() == {"event_streams": 0, "websocket_panels": 0}
+            restored = await client.ws_connect(site.make_url("/api/ws?window=w1"))
+            assert (await restored.receive_json(timeout=1))["data"]["focused"] == ["s-3"]
+            await restored.close()
+
+    async def test_known_tabs_and_windows_switch_without_layout_reads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue: asyncio.Queue[object] = asyncio.Queue()
+
+        class Monitor:
+            def __init__(self, _connection: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Monitor:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                pass
+
+            async def async_get_next_update(self) -> object:
+                return await queue.get()
+
+        monkeypatch.setattr("iterm_agents.server.iterm2.focus.FocusMonitor", Monitor)
+        app = _App({"w1": True, "w2": True})
+        app.terminal_windows[0].tabs = [
+            _ScanTab([_ScanSession(1)], "s-1", "t1"),
+            _ScanTab([_ScanSession(2), _ScanSession(22)], "s-2", "t2"),
+        ]
+        app.terminal_windows[1].tabs = [
+            _ScanTab([_ScanSession(3)], "s-3", "t3"),
+            _ScanTab([_ScanSession(4)], "s-4", "t4"),
+        ]
+        _patch_iterm(monkeypatch, app)
+        monkeypatch.setattr("iterm_agents.server.detect_agents", lambda _pids: [])
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._toolbelt_ready_windows = {"w1", "w2"}
+        await server._scan_sessions()
+        assert server._patch_focused_session("s-22")
+        assert server._focused_by_window == {"w1": "s-1", "w2": "s-3"}, (
+            "An inactive tab's pane changes must not move the window's marker"
+        )
+        reads = AsyncMock(return_value=app)
+        monkeypatch.setattr("iterm_agents.server.iterm2.app.async_get_app", reads)
+        for _ in range(100):
+            for tab_id, window_id in (("t1", "w1"), ("t2", "w1"), ("t3", "w2"), ("t4", "w2")):
+                queue.put_nowait(SimpleNamespace(
+                    active_session_changed=None, selected_tab_changed=None,
+                    window_changed=SimpleNamespace(window_id=window_id),
+                ))
+                queue.put_nowait(SimpleNamespace(
+                    active_session_changed=None, window_changed=None,
+                    selected_tab_changed=SimpleNamespace(tab_id=tab_id),
+                ))
+        task = asyncio.create_task(server._monitor_focus_changes())
+        try:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert queue.empty()
+            reads.assert_not_awaited()
+            assert server._focused_by_window == {"w1": "s-22", "w2": "s-4"}
+        finally:
+            task.cancel()
+            await asyncio.gather(task, *server._detached_tasks, return_exceptions=True)
+
+    async def test_layout_read_preserves_tab_events_that_arrive_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _App({"w1": True})
+        app.terminal_windows[0].tabs = [
+            _ScanTab([_ScanSession(1)], "s-1", "t1"),
+            _ScanTab([_ScanSession(2), _ScanSession(22)], "s-2", "t2"),
+        ]
+        _patch_iterm(monkeypatch, app)
+        monkeypatch.setattr("iterm_agents.server.detect_agents", lambda _pids: [])
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._toolbelt_ready_windows = {"w1"}
+        await server._scan_sessions()
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_layout(_connection: object) -> _App:
+            started.set()
+            await release.wait()
+            return app
+
+        monkeypatch.setattr("iterm_agents.server.iterm2.app.async_get_app", delayed_layout)
+        task = asyncio.create_task(server._scan_sessions())
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert server._patch_focused_session("s-22")
+            assert server._patch_selected_tab("t2")
+            release.set()
+            rows = await asyncio.wait_for(task, 1)
+            assert server._focused_by_window == {"w1": "s-22"}
+            assert server._selected_tabs_by_window == {"w1": "t2"}
+            assert [row["id"] for row in rows if row["focused"]] == ["s-22"]
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_card_activation_selects_its_cached_tab_without_layout_reads(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = _ScanSession(2)
+        activate = AsyncMock()
+        monkeypatch.setattr(target, "async_activate", activate, raising=False)
+        app = _App({"w1": True})
+        app.terminal_windows[0].tabs = [
+            _ScanTab([_ScanSession(1)], "s-1", "t1"),
+            _ScanTab([target], "s-2", "t2"),
+        ]
+        _patch_iterm(monkeypatch, app)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        await server._refresh_focused_rows()
+        reads = AsyncMock(return_value=app)
+        monkeypatch.setattr("iterm_agents.server.iterm2.app.async_get_app", reads)
+        await server._activate_session("s-2")
+        activate.assert_awaited_once()
+        reads.assert_not_awaited()
+        assert server._selected_tabs_by_window == {"w1": "t2"}
+        assert server._focused_by_window == {"w1": "s-2"}
+        await asyncio.gather(*server._detached_tasks)
+
+    async def test_window_switch_burst_keeps_existing_markers_without_refreshing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue: asyncio.Queue[object] = asyncio.Queue()
+
+        class Monitor:
+            def __init__(self, _connection: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Monitor:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                pass
+
+            async def async_get_next_update(self) -> object:
+                return await queue.get()
+
+        monkeypatch.setattr("iterm_agents.server.iterm2.focus.FocusMonitor", Monitor)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._window_ids = {"w1", "w2"}
+        server._focused_by_window = {"w1": "s-1", "w2": "s-2"}
+        refresh = AsyncMock()
+        monkeypatch.setattr(server, "_refresh_focused_rows", refresh)
+        for index in range(100):
+            queue.put_nowait(SimpleNamespace(
+                active_session_changed=None, selected_tab_changed=None,
+                window_changed=SimpleNamespace(window_id=f"w{index % 2 + 1}"),
+            ))
+        task = asyncio.create_task(server._monitor_focus_changes())
+        try:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert queue.empty()
+            refresh.assert_not_awaited()
+            assert server._focused_by_window == {"w1": "s-1", "w2": "s-2"}
+        finally:
+            task.cancel()
+            await asyncio.gather(task, *server._detached_tasks, return_exceptions=True)
+
+    async def test_tab_switch_refreshes_coalesce_and_keep_latest_focus(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue: asyncio.Queue[object] = asyncio.Queue()
+
+        class Monitor:
+            def __init__(self, _connection: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Monitor:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                pass
+
+            async def async_get_next_update(self) -> object:
+                return await queue.get()
+
+        monkeypatch.setattr("iterm_agents.server.iterm2.focus.FocusMonitor", Monitor)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        started, release = asyncio.Event(), asyncio.Event()
+        snapshots = []
+
+        async def refresh() -> None:
+            snapshots.append(len(snapshots))
+            started.set()
+            await release.wait()
+
+        monkeypatch.setattr(server, "_refresh_focused_rows", refresh)
+        event = SimpleNamespace(
+            active_session_changed=None, window_changed=None,
+            selected_tab_changed=SimpleNamespace(tab_id="tab"),
+        )
+        task = asyncio.create_task(server._monitor_focus_changes())
+        try:
+            queue.put_nowait(event)
+            await asyncio.wait_for(started.wait(), 1)
+            for _ in range(100):
+                queue.put_nowait(event)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert snapshots == [0], "Only one snapshot may occupy iTerm's RPC queue"
+            release.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert snapshots == [0, 1], "One trailing snapshot must capture the last tab switch"
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, *server._detached_tasks, return_exceptions=True)
+
+    async def test_unchanged_focus_does_not_notify_other_panels(self) -> None:
+        from aiohttp import web
+
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        clients = [web.StreamResponse() for _ in range(2)]
+        for client, window_id in zip(clients, ("w1", "w2"), strict=True):
+            client.write = AsyncMock()
+            server._sse_clients.add(client)
+            server._sse_window_ids[client] = window_id
+        server._focused_by_window = {"w1": "s-1", "w2": "s-2"}
+        await server._broadcast_focus()
+        for client in clients:
+            client.write.reset_mock()
+        for _ in range(10):
+            await server._broadcast_focus()
+        for client in clients:
+            client.write.assert_not_awaited()
+        server._focused_by_window["w2"] = "s-3"
+        await server._broadcast_focus()
+        clients[0].write.assert_not_awaited()
+        clients[1].write.assert_awaited_once()
+
+    async def test_scan_cannot_overwrite_a_newer_pane_marker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        started, release, focus = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        sessions = [_GatedScanSession(pid, calls, started, release, focus) for pid in (1, 2)]
+        app = _App({"w1": True})
+        app.terminal_windows[0].tabs = [_ScanTab(sessions, active_session_id="s-1")]
+        _patch_iterm(monkeypatch, app)
+        monkeypatch.setattr("iterm_agents.server.detect_agents", lambda _pids: [])
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._toolbelt_ready_windows = {"w1"}
+        task = asyncio.create_task(server._scan_sessions())
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert server._patch_focused_session("s-2")
+            release.set()
+            await asyncio.wait_for(task, 1)
+            assert server._focused_by_window == {"w1": "s-2"}, (
+                "An older scan must not undo the event's newer active pane"
+            )
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_panel_load_uses_snapshot_while_scan_is_blocked(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -564,7 +857,8 @@ class TestAgentMonitorServer:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
         calls: list[set[str]] = []
 
-        async def fake_ensure(window_ids: set[str]) -> set[str]:
+        async def fake_ensure(window_ids: set[str], *, activate_windows: bool = True) -> set[str]:
+            assert not activate_windows
             calls.append(set(window_ids))
             return set(window_ids)
 
@@ -581,8 +875,26 @@ class TestAgentMonitorServer:
         window = _ToolbeltWindow("w2", app)
         window.tabs = [_ScanTab([_ScanSession(22)])]
         app.terminal_windows.append(window)
+        app.current_terminal_window_id = "w2"
         await server._scan_sessions()
         assert calls == [{"w1"}, {"w2"}]
+
+    async def test_scan_does_not_activate_pending_background_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _App({"w1": True, "w2": False})
+        _patch_iterm(monkeypatch, app)
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._toolbelt_ready_windows = {"w1"}
+        for _ in range(3):
+            await server._scan_sessions()
+        assert app.activations == [], "Periodic scans must not steal or restore window focus"
+        assert not app.shown["w2"]
+        app.current_terminal_window_id = "w2"
+        await server._scan_sessions()
+        assert app.shown["w2"], "The new window's toolbelt opens when the user activates it"
+        assert app.activations == []
+        assert server._toolbelt_ready_windows == {"w1", "w2"}
 
     async def test_scan_marks_each_windows_active_session(
         self, monkeypatch: pytest.MonkeyPatch
@@ -638,6 +950,14 @@ class TestAgentMonitorServer:
         response = await server._handle_panel_window(SimpleNamespace(query={}))
         assert json.loads(response.text) == {"window_id": "w2"}
         assert app.activations == []
+        # A warm sidebar still validates current ownership but needs no
+        # session hierarchy refresh, even across repeated activations.
+        reads = AsyncMock(return_value=app)
+        monkeypatch.setattr("iterm_agents.server.iterm2.app.async_get_app", reads)
+        for _ in range(10):
+            response = await server._handle_panel_window(SimpleNamespace(query={}))
+            assert json.loads(response.text) == {"window_id": "w2"}
+        reads.assert_not_awaited()
 
     async def test_closing_a_window_prunes_its_focus_state(
         self, monkeypatch: pytest.MonkeyPatch
@@ -654,6 +974,9 @@ class TestAgentMonitorServer:
         await server._scan_sessions()
         assert server._focused_by_window == {"w1": "s-1"}
         assert server._session_window_ids == {"s-1": "w1"}
+        assert set(server._tab_window_ids.values()) == {"w1"}
+        assert set(server._session_tab_ids) == {"s-1"}
+        assert set(server._selected_tabs_by_window) == {"w1"}
 
     async def test_focus_events_are_scoped_and_closed_window_is_cleared(self) -> None:
         from aiohttp import web

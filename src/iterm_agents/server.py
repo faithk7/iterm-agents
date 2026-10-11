@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import time
@@ -64,15 +65,6 @@ async def _session_variable(session: iterm2.session.Session, name: str) -> objec
         return None
 
 
-def _focused_sessions_by_window(iterm2_app: iterm2.app.App) -> dict[str, str]:
-    """Each window retains the active pane in its selected tab."""
-    return {
-        window.window_id: window.current_tab.active_session_id
-        for window in iterm2_app.terminal_windows
-        if window.current_tab is not None and window.current_tab.active_session_id
-    }
-
-
 class AgentMonitorServer:
     """Manages the aiohttp server and iTerm2 Toolbelt integration."""
 
@@ -90,6 +82,9 @@ class AgentMonitorServer:
         self._sse_window_ids: weakref.WeakKeyDictionary[web.StreamResponse, str] = (
             weakref.WeakKeyDictionary()
         )
+        self._sse_focus_ids: weakref.WeakKeyDictionary[web.StreamResponse, str] = (
+            weakref.WeakKeyDictionary()
+        )
         self._session_state = SessionStateTracker()
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
@@ -102,8 +97,16 @@ class AgentMonitorServer:
         self._keystroke_task: asyncio.Task[None] | None = None
         self._focus_task: asyncio.Task[None] | None = None
         self._focus_worker_task: asyncio.Task[None] | None = None
+        self._focus_refresh_task: asyncio.Task[None] | None = None
+        self._focus_refresh_pending = False
+        self._focus_epoch = 0
         self._pending_focus_id: str | None = None
+        self._iterm_app: iterm2.app.App | None = None
         self._focused_by_window: dict[str, str] = {}
+        self._active_sessions_by_tab: dict[str, str] = {}
+        self._selected_tabs_by_window: dict[str, str] = {}
+        self._tab_window_ids: dict[str, str] = {}
+        self._session_tab_ids: dict[str, str] = {}
         self._session_window_ids: dict[str, str] = {}
         self._sessions_by_id: dict[str, iterm2.session.Session] = {}
         self._detached_tasks: set[asyncio.Task[None]] = set()
@@ -123,6 +126,8 @@ class AgentMonitorServer:
         app.router.add_get("/api/clear", self._handle_clear)
         app.router.add_get("/api/label", self._handle_label)
         app.router.add_get("/api/events", self._handle_sse)
+        app.router.add_get("/api/ws", self._handle_ws)
+        app.router.add_get("/api/diagnostics", self._handle_diagnostics)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -135,7 +140,7 @@ class AgentMonitorServer:
             display_name="Agents",
             identifier="dev.iterm-agents.monitor",
             reveal_if_already_registered=True,
-            url=self.url,
+            url=self.url + "?v=" + hashlib.sha256(AGENT_MONITOR_HTML.encode()).hexdigest()[:12],
         )
 
         self._toolbelt_ready_windows.update(await self._ensure_toolbelts_visible(None))
@@ -164,7 +169,9 @@ class AgentMonitorServer:
         except iterm2.mainmenu.MenuItemException:
             return
 
-    async def _ensure_toolbelts_visible(self, window_ids: set[str] | None) -> set[str]:
+    async def _ensure_toolbelts_visible(
+        self, window_ids: set[str] | None, *, activate_windows: bool = True
+    ) -> set[str]:
         """Show the Toolbelt in each window; returns ids confirmed showing it.
 
         Toolbelt visibility is per window and Show Toolbelt only toggles the
@@ -172,6 +179,8 @@ class AgentMonitorServer:
         original key window is restored. `None` means every window. While
         iTerm2 is in the background the item is disabled; bail before
         activating anything and let the caller retry unconfirmed ids later.
+        Background scans use activate_windows=False and wait for the user
+        to activate a new window instead of stealing and restoring focus.
         """
         ensured: set[str] = set()
         if _SHOW_TOOLBELT_ID is None:
@@ -182,6 +191,7 @@ class AgentMonitorServer:
             return ensured
         if iterm2_app is None:
             return ensured
+        self._iterm_app = iterm2_app
 
         try:
             gate = await iterm2.mainmenu.MainMenu.async_get_menu_item_state(
@@ -199,7 +209,8 @@ class AgentMonitorServer:
         targets = [
             w
             for w in iterm2_app.terminal_windows
-            if window_ids is None or w.window_id in window_ids
+            if (window_ids is None or w.window_id in window_ids)
+            and (activate_windows or w.window_id == key_id)
         ]
         targets.sort(key=lambda w: w.window_id != key_id)
         activated_other = False
@@ -274,11 +285,42 @@ class AgentMonitorServer:
                         if self._patch_focused_session(update.active_session_changed.session_id):
                             await self._broadcast_focus()
                         else:
-                            self._spawn_detached(self._refresh_focused_rows())
-                    elif update.selected_tab_changed or update.window_changed:
-                        self._spawn_detached(self._refresh_focused_rows())
+                            self._focus_epoch += 1
+                            self._queue_focus_refresh()
+                    elif update.selected_tab_changed:
+                        if self._patch_selected_tab(update.selected_tab_changed.tab_id):
+                            await self._broadcast_focus()
+                        else:
+                            self._focus_epoch += 1
+                            self._queue_focus_refresh()
+                    elif update.window_changed:
+                        # Switching key windows does not change either one's
+                        # selected tab or pane. Keep their markers untouched.
+                        window_id = update.window_changed.window_id
+                        if self._window_ids is None or window_id not in self._window_ids:
+                            self._queue_focus_refresh()
         except Exception as e:
             print(f"iterm-agents: focus monitor error: {e}")
+
+    def _queue_focus_refresh(self) -> None:
+        """One snapshot worker, with one trailing refresh for newer events."""
+        self._focus_refresh_pending = True
+        if self._focus_refresh_task is None or self._focus_refresh_task.done():
+            self._focus_refresh_task = asyncio.create_task(self._drain_focus_refreshes())
+            self._detached_tasks.add(self._focus_refresh_task)
+            self._focus_refresh_task.add_done_callback(self._detached_tasks.discard)
+
+    async def _drain_focus_refreshes(self) -> None:
+        try:
+            while self._focus_refresh_pending:
+                self._focus_refresh_pending = False
+                await self._refresh_focused_rows()
+        except Exception as error:
+            # A disconnected API or closing window must not stop the focus
+            # monitor; another event can retry once iTerm becomes available.
+            print(f"iterm-agents: focus refresh error: {error}")
+        finally:
+            self._focus_refresh_task = None
 
     def _spawn_detached(self, coro: Coroutine[Any, Any, None]) -> None:
         """Run a coroutine detached, keeping a reference until it completes."""
@@ -286,7 +328,7 @@ class AgentMonitorServer:
         self._detached_tasks.add(task)
         task.add_done_callback(self._detached_tasks.discard)
 
-    def _patch_focused_session(self, session_id: str) -> bool:
+    def _patch_focused_session(self, session_id: str, *, select_tab: bool = False) -> bool:
         """Move the marker to a newly active session without any RPC.
 
         Uses the session map from the last scan; returns False for a session
@@ -297,24 +339,90 @@ class AgentMonitorServer:
         window_id = self._session_window_ids.get(session_id)
         if window_id is None:
             return False
+        self._focus_epoch += 1
+        tab_id = self._session_tab_ids.get(session_id)
+        if tab_id is not None:
+            self._active_sessions_by_tab[tab_id] = session_id
+            if select_tab:
+                self._selected_tabs_by_window[window_id] = tab_id
+            if self._selected_tabs_by_window.get(window_id) != tab_id:
+                # A hidden tab can change its active pane without changing
+                # the window's visible pane. Remember it for the next switch.
+                return True
         self._focused_by_window[window_id] = session_id
         self._apply_focused_cache()
         return True
 
+    def _patch_selected_tab(self, tab_id: str) -> bool:
+        """Select a known tab using its remembered pane, with no iTerm RPC."""
+        window_id = self._tab_window_ids.get(tab_id)
+        if window_id is None:
+            return False
+        self._focus_epoch += 1
+        self._selected_tabs_by_window[window_id] = tab_id
+        session_id = self._active_sessions_by_tab.get(tab_id, "")
+        if session_id:
+            self._focused_by_window[window_id] = session_id
+        else:
+            self._focused_by_window.pop(window_id, None)
+        self._apply_focused_cache()
+        return True
+
+    def _index_layout(self, app: iterm2.app.App, *, preserve_focus: bool = False) -> None:
+        """Keep topology and every tab's focus warm, including inactive windows."""
+        self._iterm_app = app
+        self._window_ids = {w.window_id for w in app.terminal_windows}
+        tabs = [(window.window_id, tab) for window in app.terminal_windows for tab in window.tabs]
+        self._tab_window_ids = {tab.tab_id: window_id for window_id, tab in tabs}
+        self._session_tab_ids = {
+            session.session_id: tab.tab_id for _, tab in tabs for session in tab.sessions
+        }
+        self._session_window_ids = {
+            session.session_id: window_id for window_id, tab in tabs for session in tab.sessions
+        }
+        self._sessions_by_id = {
+            session.session_id: session for _, tab in tabs for session in tab.sessions
+        }
+        active = {tab.tab_id: tab.active_session_id or "" for _, tab in tabs}
+        selected = {
+            window.window_id: window.current_tab.tab_id
+            for window in app.terminal_windows
+            if window.current_tab is not None
+        }
+        if preserve_focus:
+            # An event arrived while the layout RPC was running. Its focus
+            # wins, provided the referenced tabs and panes still exist.
+            active.update(
+                (tab_id, session_id)
+                for tab_id, session_id in self._active_sessions_by_tab.items()
+                if self._session_tab_ids.get(session_id) == tab_id
+            )
+            selected.update(
+                (window_id, tab_id)
+                for window_id, tab_id in self._selected_tabs_by_window.items()
+                if self._tab_window_ids.get(tab_id) == window_id
+            )
+        self._active_sessions_by_tab = active
+        self._selected_tabs_by_window = selected
+        self._focused_by_window = {
+            window_id: active[tab_id]
+            for window_id, tab_id in selected.items()
+            if active.get(tab_id)
+        }
+        self._apply_focused_cache()
+
     async def _refresh_focused_rows(self) -> None:
         """Recompute focused ids from a fresh snapshot and push them out."""
+        epoch = self._focus_epoch
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
             return
-        self._window_ids = {w.window_id for w in iterm2_app.terminal_windows}
-        self._focused_by_window = _focused_sessions_by_window(iterm2_app)
-        self._session_window_ids = {
-            session.session_id: window.window_id
-            for window in iterm2_app.terminal_windows
-            for tab in window.tabs
-            for session in tab.sessions
-        }
-        self._apply_focused_cache()
+        if epoch != self._focus_epoch:
+            # A newer pane event already patched the cache while this RPC
+            # was in flight. A trailing snapshot resolves the latest tab.
+            self._focus_refresh_pending = True
+            return
+        self._index_layout(iterm2_app)
         await self._broadcast_focus()
 
     def _apply_focused_cache(self) -> None:
@@ -325,31 +433,68 @@ class AgentMonitorServer:
             row["focused"] = self._focused_by_window.get(window_id or "") == session_id
 
     async def _broadcast_focus(self) -> None:
-        """Send each panel only the focus state of its owning window."""
-        for window_id in set(self._sse_window_ids.values()):
-            session_id = self._focused_by_window.get(window_id)
-            await self._broadcast_sse(
-                "focus-changed",
-                {"window_id": window_id, "focused": [session_id] if session_id else []},
-                window_id=window_id,
-            )
+        """Send only changed markers, scoped to each connected panel."""
+        for client in list(self._sse_clients):
+            window_id = self._sse_window_ids.get(client, "")
+            if not window_id:
+                continue
+            session_id = self._focused_by_window.get(window_id, "")
+            if self._sse_focus_ids.get(client) == session_id:
+                continue
+            try:
+                await self._send_panel_event(
+                    client, "focus-changed",
+                    {"window_id": window_id, "focused": [session_id] if session_id else []},
+                )
+            except Exception:
+                self._sse_clients.discard(client)
+                self._sse_window_ids.pop(client, None)
+                self._sse_focus_ids.pop(client, None)
+            else:
+                self._sse_focus_ids[client] = session_id
 
     async def _broadcast_sse(
         self, event: str, data: object = None, *, window_id: str | None = None
     ) -> None:
         """Send an event, optionally restricted to panels bound to one window."""
-        payload = json.dumps({} if data is None else data)
         dead: list[web.StreamResponse] = []
         for client in list(self._sse_clients):
             if window_id is not None and self._sse_window_ids.get(client) != window_id:
                 continue
             try:
-                await client.write(f"event: {event}\ndata: {payload}\n\n".encode())
+                await self._send_panel_event(client, event, data)
             except Exception:
                 dead.append(client)
         for d in dead:
             self._sse_clients.discard(d)
             self._sse_window_ids.pop(d, None)
+            self._sse_focus_ids.pop(d, None)
+
+    async def _send_panel_event(
+        self, client: web.StreamResponse, event: str, data: object = None
+    ) -> None:
+        payload = {} if data is None else data
+        if isinstance(client, web.WebSocketResponse):
+            await client.send_json({"event": event, "data": payload})
+        else:
+            # Older pages may reconnect before iTerm reloads their HTML.
+            await client.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode())
+
+    async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+        """Push events without occupying WebKit's finite HTTP request slots."""
+        response = web.WebSocketResponse(heartbeat=30, max_msg_size=1024)
+        await response.prepare(request)
+        self._sse_clients.add(response)
+        self._sse_window_ids[response] = request.query.get("window", "")
+        try:
+            await self._broadcast_focus()
+            async for _message in response:
+                pass
+        finally:
+            self._sse_clients.discard(response)
+            self._sse_window_ids.pop(response, None)
+            self._sse_focus_ids.pop(response, None)
+        return response
 
     async def _handle_sse(self, request: web.Request) -> web.StreamResponse:
         """SSE endpoint for pushing events to the WebView."""
@@ -360,6 +505,8 @@ class AgentMonitorServer:
         await response.prepare(request)
         self._sse_clients.add(response)
         self._sse_window_ids[response] = request.query.get("window", "")
+        # A reconnect needs its current marker even if no pane has changed.
+        await self._broadcast_focus()
 
         # Keep connection alive
         try:
@@ -371,15 +518,19 @@ class AgentMonitorServer:
         finally:
             self._sse_clients.discard(response)
             self._sse_window_ids.pop(response, None)
+            self._sse_focus_ids.pop(response, None)
         return response
 
     async def _current_window_id(self) -> str:
         """Resolve the key window once the panel has seen its own window is key."""
-        app = await iterm2.app.async_get_app(self.connection)
+        # App receives layout notifications itself. Ownership validation only
+        # needs fresh focus, not another full session hierarchy per activation.
+        app = self._iterm_app or await iterm2.app.async_get_app(self.connection)
         if app is None:
             return ""
-        self._window_ids = {w.window_id for w in app.terminal_windows}
+        self._iterm_app = app
         await app.async_refresh_focus()
+        self._window_ids = {w.window_id for w in app.terminal_windows}
         return app.current_window.window_id if app.current_window is not None else ""
 
     async def _handle_panel_window(self, request: web.Request) -> web.Response:
@@ -392,7 +543,17 @@ class AgentMonitorServer:
 
     async def _handle_index(self, request: web.Request) -> web.Response:
         """Serve the single-page panel UI."""
-        return web.Response(text=AGENT_MONITOR_HTML, content_type="text/html")
+        return web.Response(
+            text=AGENT_MONITOR_HTML, content_type="text/html", headers={"Cache-Control": "no-store"}
+        )
+
+    async def _handle_diagnostics(self, request: web.Request) -> web.Response:
+        """Local transport counts, without session names or terminal content."""
+        sockets = sum(isinstance(client, web.WebSocketResponse) for client in self._sse_clients)
+        return web.json_response({
+            "event_streams": len(self._sse_clients) - sockets,
+            "websocket_panels": sockets,
+        })
 
     _SCAN_CACHE_TTL = 0.9
     _SCAN_RPC_CONCURRENCY = 4
@@ -469,9 +630,11 @@ class AgentMonitorServer:
 
     async def _scan_sessions(self) -> list[dict[str, str | int]]:
         """Snapshot every session: variables, agent state, git, screen hints."""
+        focus_epoch = self._focus_epoch
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
             raise RuntimeError("iterm-agents: session scan unavailable")
+        self._index_layout(iterm2_app, preserve_focus=focus_epoch != self._focus_epoch)
 
         # A window opened after startup hides its toolbelt; open it once.
         # A window the user hides by hand stays marked and is not reopened.
@@ -479,9 +642,9 @@ class AgentMonitorServer:
         self._window_ids = window_ids
         self._toolbelt_ready_windows.intersection_update(window_ids)
         new_window_ids = window_ids - self._toolbelt_ready_windows
-        if new_window_ids:
+        if iterm2_app.current_terminal_window_id in new_window_ids:
             self._toolbelt_ready_windows.update(
-                await self._ensure_toolbelts_visible(new_window_ids)
+                await self._ensure_toolbelts_visible(new_window_ids, activate_windows=False)
             )
 
         # Collect session PIDs for agent-session mapping. Fetching pid and
@@ -489,19 +652,7 @@ class AgentMonitorServer:
         # gather is bounded by _scan_rpc_gate so a focus request can enter the
         # shared iTerm connection between small batches. The id map then lets
         # focus clicks and focus-change updates skip a full app snapshot.
-        all_sessions = [
-            session
-            for window in iterm2_app.terminal_windows
-            for tab in window.tabs
-            for session in tab.sessions
-        ]
-        self._sessions_by_id = {s.session_id: s for s in all_sessions}
-        self._session_window_ids = {
-            session.session_id: window.window_id
-            for window in iterm2_app.terminal_windows
-            for tab in window.tabs
-            for session in tab.sessions
-        }
+        all_sessions = list(self._sessions_by_id.values())
         pids, paths = await asyncio.gather(
             asyncio.gather(*(self._scan_session_variable(s, "pid") for s in all_sessions)),
             asyncio.gather(*(self._scan_session_variable(s, "path") for s in all_sessions)),
@@ -522,9 +673,8 @@ class AgentMonitorServer:
             if detected.session_pid is not None:
                 agent_by_session_pid[detected.session_pid] = detected
 
-        # Each window's current tab marks its active session so the UI can
-        # flag the focused pane; these are cached properties, not RPCs.
-        self._focused_by_window = _focused_sessions_by_window(iterm2_app)
+        # Focus events update these maps during the scan. Do not reapply the
+        # earlier layout snapshot after variables and process reads finish.
         focused_ids = set(self._focused_by_window.values())
 
         # Resolve each directory once before rows share its cached Git info.
@@ -666,22 +816,21 @@ class AgentMonitorServer:
             except Exception:
                 pass  # closed between scan and click; fall through to lookup
             else:
-                if self._patch_focused_session(session_id):
+                if self._patch_focused_session(session_id, select_tab=True):
                     self._spawn_detached(self._broadcast_focus())
                 return
 
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
             return
+        self._index_layout(iterm2_app)
 
         for window in iterm2_app.terminal_windows:
             for tab in window.tabs:
                 for session in tab.sessions:
                     if session.session_id == session_id:
                         await session.async_activate()
-                        self._sessions_by_id[session_id] = session
-                        self._session_window_ids[session_id] = window.window_id
-                        if self._patch_focused_session(session_id):
+                        if self._patch_focused_session(session_id, select_tab=True):
                             self._spawn_detached(self._broadcast_focus())
                         return
 

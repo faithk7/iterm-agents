@@ -22,14 +22,17 @@ const script = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 let keyWindow = 'w1';
 const focus = {w1: 'one', w2: 'two'};
 const activations = [];
-function makePanel(savedName = '') {
+function makePanel(savedName = '', probeRule = true) {
   const elements = new Map();
   const documentEvents = {};
   const requests = [];
   const sources = [];
+  const timeouts = [];
   let resolveBinding;
   let resolveInitialPoll;
   let ownerKey = false;
+  let clock = 1000;
+  let probeReads = 0;
   // iTerm2's WebView may report false even during an actual panel click.
   const hasFocus = false;
   const windowEvents = {};
@@ -38,6 +41,8 @@ function makePanel(savedName = '') {
     {id: 'two', name: 'two', agent_state: 'idle', window_id: 'w2'},
   ];
   const document = {
+    styleSheets: [{cssRules: [{selectorText: '#owner-probe::-webkit-scrollbar'},
+      ...(probeRule ? [{selectorText: '#owner-probe::-webkit-scrollbar:window-inactive'}] : [])]}],
     hasFocus: () => hasFocus,
     addEventListener(name, fn) {(documentEvents[name] ||= []).push(fn);},
     querySelectorAll: () => [], querySelector: () => null,
@@ -45,21 +50,24 @@ function makePanel(savedName = '') {
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, {
         value: '', innerHTML: '', focus() {}, select() {}, addEventListener() {},
-        style: {}, offsetWidth: 50, get clientWidth() { return ownerKey ? 49 : 48; },
+        style: {}, offsetWidth: 50,
+        get clientWidth() { probeReads++; return ownerKey ? 49 : 48; },
       });
       return elements.get(id);
     },
   };
   const context = vm.createContext({
+    Date: class extends Date { static now() { return clock; } },
     document, window: {
       name: savedName,
+      location: {protocol: 'http:', host: 'panel'},
       addEventListener(name, fn) {(windowEvents[name] ||= []).push(fn);}, innerHeight: 900,
     },
-    setInterval() {}, setTimeout() {},
-    EventSource: class {
-      constructor(url) { this.url = url; this.listeners = {}; sources.push(this); }
+    setInterval() {}, setTimeout(fn, ms) {timeouts.push({fn, ms});},
+    WebSocket: class {
+      constructor(url) { this.url = url; sources.push(this); }
       close() {this.closed = true;}
-      addEventListener(name, fn) {this.listeners[name] = fn;}
+      emit(event, data = {}) {this.onmessage({data: JSON.stringify({event, data})});}
     },
     fetch(url) {
       requests.push(url);
@@ -90,10 +98,12 @@ function makePanel(savedName = '') {
     },
   });
   vm.runInContext(script, context);
-  return {context, requests, sources, documentEvents,
+  return {context, requests, sources, timeouts, documentEvents,
     bind: () => resolveBinding(), initialPoll: () => resolveInitialPoll(),
     setOwnerKey: key => { ownerKey = key; },
-    probe: () => vm.runInContext('bindIfOwnerWindowKey()', context),
+    probe: () => { clock += 1000; vm.runInContext('checkOwnerWindow()', context); },
+    tick: () => { clock += 250; vm.runInContext('checkOwnerWindow()', context); },
+    probeReads: () => probeReads,
     loseFocus: () => windowEvents.blur.forEach(fn => fn())};
 }
 async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
@@ -120,7 +130,7 @@ async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
   await binding;
   assert.equal(vm.runInContext('panelWindowId', b.context), 'w2');
   for (const [panel, owner] of [[a, 'w1'], [b, 'w2']]) {
-    assert.equal(panel.sources.at(-1).url, '/api/events?window=' + owner);
+    assert.equal(panel.sources.at(-1).url, 'ws://panel/api/ws?window=' + owner);
     assert.ok(panel.sources[0].closed, 'binding replaces the unscoped event stream');
     panel.initialPoll();
     await settle();
@@ -132,7 +142,7 @@ async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
     assert.ok(vm.runInContext("document.getElementById('sessions').innerHTML", panel.context)
       .includes('idle current'), 'the bound panel must render the blue current-pane indicator');
     const requestsBefore = panel.requests.length;
-    panel.sources.at(-1).listeners['sessions-changed']();
+    panel.sources.at(-1).emit('sessions-changed');
     await settle();
     assert.equal(panel.requests.length, requestsBefore + 1,
       'a completed scan updates the panel immediately without its polling timer');
@@ -149,7 +159,7 @@ async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
     await settle();
     assert.equal(vm.runInContext('panelWindowId', reloaded.context), owner,
       'a reload restores its own owner even when another window is key');
-    assert.equal(reloaded.sources[0].url, '/api/events?window=' + owner);
+    assert.equal(reloaded.sources[0].url, 'ws://panel/api/ws?window=' + owner);
     assert.ok(!reloaded.requests.includes('/api/panel-window'),
       'restoring a known owner requires no simulated click or focus handshake');
     assert.ok(vm.runInContext("document.getElementById('sessions').innerHTML", reloaded.context)
@@ -210,6 +220,50 @@ async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
   await settle();
   assert.equal(vm.runInContext('panelWindowId', f.context), '',
     'losing key status during the handshake must not assign an owner');
+  assert.ok(!['Connecting focus marker…', 'Focus connection failed. Click here to retry.']
+    .includes(vm.runInContext("document.getElementById('focus-hint').textContent", f.context)),
+    'background attempts leave the hint alone');
+  keyWindow = 'w1';
+  d.setOwnerKey(true);
+  d.probe(); d.probe();
+  assert.equal(d.requests.filter(url => url === '/api/panel-window').length, 2,
+    'a bound panel rechecks once per activation, not on every tick');
+  d.bind();
+  await settle();
+  assert.equal(vm.runInContext('panelWindowId', d.context), 'w1');
+  vm.runInContext("panelWindowId = 'w2'", d.context);
+  d.setOwnerKey(false); d.probe();
+  d.setOwnerKey(true); d.probe();
+  d.bind();
+  await settle();
+  assert.equal(vm.runInContext('panelWindowId', d.context), 'w1',
+    'a wrong binding corrects itself the next time its window is key');
+  assert.equal(vm.runInContext('window.name', d.context), 'iterm-agents:window:w1');
+  const beforeIdleReads = d.probeReads();
+  const beforeIdleRequests = d.requests.length;
+  for (let i = 0; i < 100; i++) d.tick();
+  assert.ok(d.probeReads() - beforeIdleReads <= 25,
+    'bound panels rebuild the scrollbar at most once a second');
+  assert.equal(d.requests.length, beforeIdleRequests,
+    'staying in a bound window requires no further handshakes');
+  const noRule = makePanel('', false);
+  noRule.setOwnerKey(true);
+  noRule.probe();
+  assert.ok(!noRule.requests.includes('/api/panel-window'),
+    'without the :window-inactive rule every panel reads as key, so never auto-bind');
+  const restored = makePanel('iterm-agents:window:w1');
+  await settle();
+  const oldSocket = restored.sources.at(-1);
+  oldSocket.onerror(); oldSocket.onclose();
+  assert.equal(restored.timeouts.filter(timer => timer.ms === 3000).length, 1,
+    'a failed socket schedules only one reconnect');
+  restored.timeouts.find(timer => timer.ms === 3000).fn();
+  oldSocket.emit('focus-changed', {window_id: 'w1', focused: []});
+  assert.deepEqual(Array.from(vm.runInContext('allSessions.map(s => s.focused)', restored.context)),
+    [true, false], 'a closed socket cannot overwrite the restored marker');
+  restored.sources.at(-1).emit('focus-changed', {window_id: 'w1', focused: []});
+  assert.deepEqual(Array.from(vm.runInContext('allSessions.map(s => s.focused)', restored.context)),
+    [false, false], 'the reconnected socket delivers focus updates');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 """],
         input=json.dumps(script), text=True, capture_output=True, timeout=10,
@@ -237,6 +291,7 @@ const scrolls = [];
 const focusRequests = [];
 const cardPositions = {one: 1650, two: 2650};
 const viewport = {
+  location: {protocol: 'http:', host: 'panel'},
   innerHeight: 900, scrollY: 600, addEventListener() {},
   scrollTo(options) {
     const session = cards.find(card => card.classList.contains('current')).dataset.session;
@@ -288,6 +343,7 @@ function element(id) {
 }
 const context = vm.createContext({
   document: {
+    styleSheets: [],
     hasFocus: () => false,
     getElementById: element,
     addEventListener(name, fn) { addListener(documentListeners, 'document', name, fn); },
@@ -310,12 +366,13 @@ const context = vm.createContext({
   },
   setInterval() {},
   setTimeout: fn => timeouts.push(fn),
-  EventSource: class {
-    close() {}
-    addEventListener(name, fn) {
-      listeners[name] = name === 'focus-changed'
-        ? e => fn({data: JSON.stringify({window_id: 'w1', ...JSON.parse(e.data)})}) : fn;
+  WebSocket: class {
+    constructor() {
+      listeners['focus-changed'] = e => this.onmessage({data: JSON.stringify({
+        event: 'focus-changed', data: {window_id: 'w1', ...JSON.parse(e.data)},
+      })});
     }
+    close() {}
   },
 });
 vm.runInContext(script, context);
@@ -363,6 +420,12 @@ const beforeForeignFocus = scrolls.length;
 listeners['focus-changed']({data: JSON.stringify({window_id: 'w2', focused: ['two']})});
 assert.ok(classes.has('current'), 'another window cannot move this panel marker');
 assert.equal(scrolls.length, beforeForeignFocus, 'another window cannot scroll this panel');
+escapeElements = 0;
+for (let i = 0; i < 100; i++) {
+  listeners['focus-changed']({data: JSON.stringify({focused: ['one']})});
+}
+assert.equal(escapeElements, 0, 'duplicate focus events must skip HTML generation');
+assert.equal(scrolls.length, beforeForeignFocus, 'duplicate events must not measure or scroll');
 vm.runInContext("acknowledgeCard('one'); filterSessions()", context);
 assert.equal(writes, initialWrites, 'clearing done must preserve the card');
 assert.equal(cards[0], originalCard);
