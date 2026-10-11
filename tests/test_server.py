@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -211,6 +214,100 @@ class TestResolveBoundPort:
 
 
 class TestAgentMonitorServer:
+    async def test_initial_failed_scan_reports_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aiohttp import web
+
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        monkeypatch.setattr(
+            server, "_scan_sessions", AsyncMock(side_effect=RuntimeError("ps failed"))
+        )
+        with pytest.raises(web.HTTPServiceUnavailable):
+            await server._handle_sessions(None)
+
+    async def test_failed_pid_read_propagates_but_valid_missing_pid_does_not(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        session = SimpleNamespace(
+            async_get_variable=AsyncMock(side_effect=RuntimeError("RPC failed"))
+        )
+        with pytest.raises(RuntimeError, match="RPC failed"):
+            await server._scan_session_variable(session, "pid")
+        session.async_get_variable = AsyncMock(return_value=None)
+        assert await server._scan_session_variable(session, "pid") is None
+
+    async def test_codex_completion_uses_fresh_scans_shared_across_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = {"now": 10.0}
+        monkeypatch.setattr(
+            "iterm_agents.server.time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        running = {"id": "s-1", "agent_type": "codex", "agent_state": "running"}
+        idle = {**running, "agent_state": "idle"}
+        scan = AsyncMock(side_effect=[[running], [idle], [running], [idle], [idle]])
+        monkeypatch.setattr(server, "_scan_sessions", scan)
+
+        async def states() -> list[str]:
+            responses = await asyncio.gather(*(server._handle_sessions(None) for _ in range(3)))
+            return [json.loads(response.text)[0]["agent_state"] for response in responses]
+
+        assert await states() == ["running"] * 3
+        clock["now"] = 11.0
+        assert await states() == ["running"] * 3
+        clock["now"] = 11.5
+        assert await states() == ["running"] * 3
+        assert scan.await_count == 2
+        clock["now"] = 12.0
+        assert await states() == ["running"] * 3
+        clock["now"] = 13.0
+        assert await states() == ["running"] * 3
+        clock["now"] = 16.0
+        assert await states() == ["awaiting_user"] * 3
+        assert scan.await_count == 5
+
+    async def test_failed_scan_keeps_running_and_resets_confirmation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = {"now": 10.0}
+        monkeypatch.setattr(
+            "iterm_agents.server.time", SimpleNamespace(monotonic=lambda: clock["now"])
+        )
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        running = {"id": "s-1", "agent_type": "codex", "agent_state": "running"}
+        idle = {**running, "agent_state": "idle"}
+        scan = AsyncMock(side_effect=[[running], [idle], RuntimeError("ps failed"), [idle], [idle]])
+        monkeypatch.setattr(server, "_scan_sessions", scan)
+        for now, expected in (
+            (10, "running"),
+            (11, "running"),
+            (14, "running"),
+            (15, "running"),
+            (18, "awaiting_user"),
+        ):
+            clock["now"] = float(now)
+            response = await server._handle_sessions(None)
+            assert json.loads(response.text)[0]["agent_state"] == expected
+
+    async def test_failed_codex_screen_read_is_unknown(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._screen_text = AsyncMock(return_value=None)
+        assert await server._screen_hint_state(_Session(""), AgentType.CODEX, "idle") == "unknown"
+
+    async def test_codex_screen_hint_can_override_failed_assertion_read(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        session = _Session(
+            "Working (1s • esc to interrupt)\n\u203a Ask a question\n? for shortcuts"
+        )
+        assert await server._screen_hint_state(session, AgentType.CODEX, "unknown") == "running"
+        assert (
+            await server._screen_hint_state(
+                _Session("\u203a Ask a question"), AgentType.CODEX, "unknown"
+            )
+            == "unknown"
+        )
+
     def test_url_uses_default_host_and_current_port(self) -> None:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
         server.port = 50123

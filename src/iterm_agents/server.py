@@ -355,17 +355,29 @@ class AgentMonitorServer:
         """
         async with self._scan_lock:
             timestamp, raw = self._scan_cache
-            if time.monotonic() - timestamp > self._SCAN_CACHE_TTL:
-                raw = await self._scan_sessions()
-                self._scan_cache = (time.monotonic(), raw)
-            sessions = self._session_state.apply([dict(s) for s in raw])
+            fresh = False
+            if timestamp == 0.0 or time.monotonic() - timestamp > self._SCAN_CACHE_TTL:
+                try:
+                    raw = await self._scan_sessions()
+                except Exception as error:
+                    self._session_state.invalidate_observations()
+                    if timestamp == 0.0:
+                        raise web.HTTPServiceUnavailable(text="Session scan unavailable") from error
+                    # Serve the previous display state; retry on the next poll.
+                else:
+                    timestamp = time.monotonic()
+                    self._scan_cache = (timestamp, raw)
+                    fresh = True
+            sessions = self._session_state.apply(
+                [dict(s) for s in raw], fresh=fresh, observed_at=timestamp
+            )
             return web.json_response(sessions)
 
     async def _scan_sessions(self) -> list[dict[str, str | int]]:
         """Snapshot every session: variables, agent state, git, screen hints."""
         iterm2_app = await iterm2.app.async_get_app(self.connection)
         if iterm2_app is None:
-            return []
+            raise RuntimeError("iterm-agents: session scan unavailable")
 
         # A window opened after startup hides its toolbelt; open it once.
         # A window the user hides by hand stays marked and is not reopened.
@@ -456,11 +468,12 @@ class AgentMonitorServer:
         # never moves a card out from under the cursor.
         return sessions_info
 
-    async def _scan_session_variable(
-        self, session: iterm2.session.Session, name: str
-    ) -> object:
+    async def _scan_session_variable(self, session: iterm2.session.Session, name: str) -> object:
         """Read scan metadata without flooding iTerm's focus RPC queue."""
         async with self._scan_rpc_gate:
+            if name == "pid":
+                # Failed reads are different from a valid session with no PID.
+                return await session.async_get_variable(name)
             return await _session_variable(session, name)
 
     _GIT_CACHE_TTL = 5.0
@@ -486,7 +499,7 @@ class AgentMonitorServer:
     ) -> dict[str, str | int]:
         """Build one session's API row, upgrading idle agents via the screen."""
         agent_state = agent.state.value if agent else ""
-        if agent is not None and agent.state is AgentState.IDLE:
+        if agent is not None and agent.state in (AgentState.IDLE, AgentState.UNKNOWN):
             if agent.agent_type is AgentType.CURSOR:
                 agent_state = await self._cursor_state_from_screen(session, agent_state)
             elif agent.agent_type in (AgentType.DEVIN, AgentType.CODEX, AgentType.KIMI):
@@ -500,6 +513,7 @@ class AgentMonitorServer:
             "branch": git.branch if git else "",
             "root_repo": git.root_repo.replace(_HOME_DIR, "~") if git else "",
             "agent_type": agent.agent_type.value if agent else "",
+            "agent_pid": agent.pid if agent else 0,
             "agent_state": agent_state,
             "pid": pid,
             "focused": focused,
@@ -602,6 +616,8 @@ class AgentMonitorServer:
     ) -> str:
         """Upgrade an idle session while its live-turn hint is on screen."""
         text = await self._screen_text(session)
+        if text is None and agent_type is AgentType.CODEX:
+            return AgentState.UNKNOWN.value
         if text is not None and screen_shows_active_turn(agent_type, text):
             return AgentState.RUNNING.value
         return agent_state

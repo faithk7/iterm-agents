@@ -119,6 +119,10 @@ All hints are English UI text; a localized build may not be detected.
 - **Devin** — `esc twice/again to interrupt` above the input box.
 - **Codex** — `esc to interrupt` above the `›` composer or `? for shortcuts`
   footer; covers sandbox-disabled launches where no child or assertion appears.
+  After a running turn, fresh idle observations must span three seconds before
+  the panel shows **done**. Brief pauses keep showing **running**; failed reads
+  preserve the last state and reset this confirmation period. Completion
+  normally appears about three to four seconds later with one-second polling.
 - **Kimi** — a `Working…`/`Prompting…`/`Orchestrating…`/`Queued…`/
   `Rate limited…`/`Thinking…` status label, or a bare spinner + `· Tip:` line
   while a tool runs. `Completed.`/`Failed.`/`Aborted.`/`Cancelled.` don't

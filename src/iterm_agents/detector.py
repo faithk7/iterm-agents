@@ -30,10 +30,11 @@ class AgentType(Enum):
 
 
 class AgentState(Enum):
-    """Whether an agent is mid-turn or waiting for input."""
+    """Whether an agent is mid-turn, waiting, or could not be observed."""
 
     RUNNING = "running"
     IDLE = "idle"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -72,7 +73,7 @@ def _build_process_table() -> dict[int, ProcessInfo]:
         timeout=5,
     )
     if result.returncode != 0:
-        return {}
+        raise RuntimeError("iterm-agents: process scan failed")
 
     table: dict[int, ProcessInfo] = {}
     for line in result.stdout.splitlines():
@@ -85,6 +86,8 @@ def _build_process_table() -> dict[int, ProcessInfo]:
         except ValueError:
             continue
         table[pid] = ProcessInfo(pid=pid, ppid=ppid, command=parts[2].strip())
+    if not table:
+        raise RuntimeError("iterm-agents: process scan returned no valid rows")
     return table
 
 
@@ -215,12 +218,13 @@ def _detect_claude_state(children: dict[int, list[ProcessInfo]], pid: int) -> Ag
     return AgentState.IDLE
 
 
-def _get_codex_active_pids() -> set[int]:
+def _get_codex_active_pids() -> set[int] | None:
     """Get PIDs of codex processes that are actively running a turn.
 
     Parses macOS `pmset -g assertions` output which includes per-process
     IOKit power assertions. Codex creates an assertion with the reason
     "Codex is running an active turn" when executing a turn.
+    None means the assertion read failed; an empty set is a valid idle result.
     """
     try:
         result = subprocess.run(
@@ -230,9 +234,9 @@ def _get_codex_active_pids() -> set[int]:
             timeout=3,
         )
         if result.returncode != 0:
-            return set()
+            return None
     except Exception:
-        return set()
+        return None
 
     active_pids: set[int] = set()
     lines = result.stdout.splitlines()
@@ -458,6 +462,7 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
     # Lazily fetched: `pmset` spawns a subprocess, so skip it entirely on
     # scans where no codex process exists.
     codex_active_pids: set[int] | None = None
+    codex_assertions_read = False
 
     for proc in table.values():
         agent_type = _classify(proc.command)
@@ -469,10 +474,13 @@ def detect_agents(session_pids: set[int] | None = None) -> list[AgentInfo]:
         elif agent_type is AgentType.CODEX:
             state = _detect_codex_state(children, proc.pid)
             # IOKit assertion is per-PID and authoritative
-            if codex_active_pids is None:
+            if not codex_assertions_read:
                 codex_active_pids = _get_codex_active_pids()
-            if proc.pid in codex_active_pids:
+                codex_assertions_read = True
+            if codex_active_pids is not None and proc.pid in codex_active_pids:
                 state = AgentState.RUNNING
+            elif codex_active_pids is None and state is AgentState.IDLE:
+                state = AgentState.UNKNOWN
         else:
             state = _detect_busy_child_state(children, proc.pid)
 

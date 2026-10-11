@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from git import Repo
 
 from iterm_agents.detector import (
@@ -13,6 +14,7 @@ from iterm_agents.detector import (
     GitInfo,
     ProcessInfo,
     _build_children,
+    _build_process_table,
     _comm_basename,
     _detect_claude_state,
     _detect_codex_state,
@@ -293,10 +295,38 @@ class TestGetCodexActivePids:
             mock_run.return_value.returncode = 1
             mock_run.return_value.stdout = ""
             pids = _get_codex_active_pids()
-        assert pids == set()
+        assert pids is None
+
+    def test_pmset_timeout_is_unknown(self) -> None:
+        with patch("iterm_agents.detector.subprocess.run", side_effect=TimeoutError):
+            assert _get_codex_active_pids() is None
 
 
 class TestDetectAgents:
+    def test_failed_process_scan_is_not_an_empty_snapshot(self) -> None:
+        with patch("iterm_agents.detector.subprocess.run") as run:
+            run.return_value.returncode = 1
+            with pytest.raises(RuntimeError, match="process"):
+                _build_process_table()
+
+    def test_failed_assertions_are_unknown_unless_sandbox_is_busy(self) -> None:
+        table = _make_table([(10, 1, "zsh"), (20, 10, "codex"), (40, 10, "codex")])
+        with (
+            patch("iterm_agents.detector._build_process_table", return_value=table),
+            patch("iterm_agents.detector._get_codex_active_pids", return_value=None) as read,
+        ):
+            assert [agent.state.value for agent in detect_agents({10})] == ["unknown"] * 2
+            read.assert_called_once()
+            table[30] = ProcessInfo(pid=30, ppid=20, command="sandbox-exec")
+            assert detect_agents({10})[0].state is AgentState.RUNNING
+
+    def test_empty_process_output_is_a_failed_scan(self) -> None:
+        with patch("iterm_agents.detector.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "PID PPID COMMAND\n"
+            with pytest.raises(RuntimeError, match="no valid rows"):
+                _build_process_table()
+
     def test_child_index_is_shared_and_rebuilt_for_each_snapshot(self) -> None:
         table = _make_table(
             [
