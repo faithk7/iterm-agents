@@ -104,6 +104,7 @@ function makePanel(savedName = '', probeRule = true) {
     probe: () => { clock += 1000; vm.runInContext('checkOwnerWindow()', context); },
     tick: () => { clock += 250; vm.runInContext('checkOwnerWindow()', context); },
     probeReads: () => probeReads,
+    advance: ms => { clock += ms; },
     loseFocus: () => windowEvents.blur.forEach(fn => fn())};
 }
 async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
@@ -264,6 +265,24 @@ async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
   restored.sources.at(-1).emit('focus-changed', {window_id: 'w1', focused: []});
   assert.deepEqual(Array.from(vm.runInContext('allSessions.map(s => s.focused)', restored.context)),
     [false, false], 'the reconnected socket delivers focus updates');
+  const hidden = makePanel('iterm-agents:window:w1');
+  await settle();
+  const polls = () => hidden.requests.filter(url => url.startsWith('/api/sessions')).length;
+  const before = polls();
+  vm.runInContext('document.hidden = true', hidden.context);
+  hidden.advance(1000);
+  vm.runInContext('pollSessions()', hidden.context);
+  await settle();
+  assert.equal(polls(), before, 'a hidden panel skips one-second polls');
+  hidden.advance(4000);
+  vm.runInContext('pollSessions()', hidden.context);
+  await settle();
+  assert.equal(polls(), before + 1, 'a hidden panel still polls every five seconds');
+  vm.runInContext('document.hidden = false', hidden.context);
+  hidden.advance(1000);
+  vm.runInContext('pollSessions()', hidden.context);
+  await settle();
+  assert.equal(polls(), before + 2, 'a visible panel polls every second');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 """],
         input=json.dumps(script), text=True, capture_output=True, timeout=10,

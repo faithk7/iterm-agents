@@ -871,7 +871,18 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }
 
     loadSessions();
-    setInterval(loadSessions, 1000);
+    // Polls drive the server's scans. A hidden panel (minimized, covered, on
+    // another Space) keeps slow polls so turns still get their done marks.
+    let lastPollAt = Date.now();
+    function pollSessions() {
+      if (document.hidden && Date.now() - lastPollAt < 5000) return;
+      lastPollAt = Date.now();
+      loadSessions();
+    }
+    setInterval(pollSessions, 1000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) pollSessions();
+    });
 
     // SSE streams share WebKit's small HTTP connection pool with fetch.
     // Several sidebars can exhaust it and queue a click for seconds. WebSocket
