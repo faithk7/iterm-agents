@@ -797,8 +797,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         const labelChip = s.label
           ? `<span class="label" title="${labelTitle}">${esc(s.label)}</span>`
           : '';
+        const displayName = (s.name || '').replace(/\\p{L}/u, c => c.toLowerCase());
         const nameLine = s.name && s.name !== s.path
-          ? `<div class="session-name">${esc(s.name)}</div>`
+          ? `<div class="session-name">${esc(displayName)}</div>`
           : '';
         const branchLine = s.branch || labelChip
           ? `<div class="branch-row">

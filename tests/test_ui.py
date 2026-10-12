@@ -395,6 +395,17 @@ const context = vm.createContext({
   },
 });
 vm.runInContext(script, context);
+for (const [name, displayed] of [
+  ['✳ Bd-knowledge — ~/Project', '✳ bd-knowledge — ~/Project'],
+  ['Merge latest main | iTerm', 'merge latest main | iTerm'],
+  ['already lowercase', 'already lowercase'],
+  ['Équipe API', 'équipe API'],
+]) {
+  context.sessionName = name;
+  const html = vm.runInContext(
+    "renderGroup('', '', [{id: 'case', name: sessionName, agent_state: 'idle'}])", context);
+  assert.ok(html.includes(`<div class="session-name">${displayed}</div>`));
+}
 vm.runInContext(`allSessions = [
   {id: 'one', name: 'visible', agent_state: 'awaiting_user', awaiting_user: true, window_id: 'w1'},
   {id: 'two', name: 'hidden', agent_state: 'idle', window_id: 'w1'}
