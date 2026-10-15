@@ -396,7 +396,10 @@ const context = vm.createContext({
 });
 vm.runInContext(script, context);
 for (const [name, displayed] of [
-  ['✳ Bd-knowledge — ~/Project', '✳ bd-knowledge — ~/Project'],
+  ['✳ Bd-knowledge — ~/Project', '✳ bd-knowledge'],
+  ['Full System Update — ~', 'full System Update'],
+  ['Recent Git Commits — /Users/qukai/My Project', 'recent Git Commits'],
+  ['Review — pending', 'review — pending'],
   ['Merge latest main | iTerm', 'merge latest main | iTerm'],
   ['already lowercase', 'already lowercase'],
   ['Équipe API', 'équipe API'],
