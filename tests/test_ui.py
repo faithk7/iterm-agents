@@ -400,7 +400,10 @@ for (const [name, displayed] of [
   ['Full System Update — ~', 'full System Update'],
   ['Recent Git Commits — /Users/qukai/My Project', 'recent Git Commits'],
   ['Review — pending', 'review — pending'],
-  ['Merge latest main | iTerm', 'merge latest main | iTerm'],
+  ['Merge latest main | iTerm', 'merge latest main'],
+  ['Remove file path from content | iterm-agents', 'remove file path from content'],
+  ['Summary | repo — ~/Project', 'summary'],
+  ['Summary — ~/Project | repo', 'summary'],
   ['already lowercase', 'already lowercase'],
   ['Équipe API', 'équipe API'],
 ]) {

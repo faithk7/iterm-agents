@@ -798,6 +798,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           ? `<span class="label" title="${labelTitle}">${esc(s.label)}</span>`
           : '';
         const displayName = (s.name || '')
+          .replace(/\\s+\\|.*$/, '')
           .replace(/\\s+—\\s+[~/].*$/, '')
           .replace(/\\p{L}/u, c => c.toLowerCase());
         const nameLine = s.name && s.name !== s.path
