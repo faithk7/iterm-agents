@@ -60,6 +60,26 @@ that the turn succeeded. Labels and acknowledgements live only in memory.
 
 ## Validation and future boundaries
 
+Panel requests have an eight-second deadline covering response-body decoding;
+scan work has a six-second deadline. A timed-out scan invalidates completion
+confirmation, preserves the previous snapshot, and marks it stale. Timed-out
+Git reads remain shared so retries do not spawn additional threads for the
+same blocked directory. A freshness header drives the panel's paused indicator.
+
+Keyboard, focus, and panel-health monitors run under bounded retry backoff.
+The panel-health monitor exchanges application acknowledgements every 15
+seconds. It can rebuild a previously responsive, confirmed active panel after
+60 seconds without acknowledgement, respecting hidden Toolbelts, active edits,
+sleep/wake grace periods, and a five-minute recovery cooldown. It measures
+JavaScript responsiveness, not GPU painting. No system-log polling is involved.
+Tool registration is global, so a rebuild can replace every Agents view.
+
+`recovery.py` shares tool registration between the server and `--reload-panel`.
+The CLI discovers and verifies the local monitor through a per-user runtime
+file and bypasses the monitor's single-instance lock. Rebuilding views leaves
+backend labels and completion state intact, but resets view-local search and
+collapse state. It does not restart iTerm2 or the monitored CLIs.
+
 Run `uv run pytest`, `uv run ruff check src/`,
 `uv run ruff format --check src/`, and `uv run mypy src/`.
 Tests for process snapshots, screen signals, and Git metadata sit in matching

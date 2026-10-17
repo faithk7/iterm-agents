@@ -185,6 +185,23 @@ rm -rf "$HOME/.local/share/iterm-agents"
 
 ## 常见问题
 
+如果监控进程仍在运行，但 Agents 侧栏空白或卡住，可以重建面板，无需重启终端会话：
+
+```bash
+uv run iterm-agents --reload-panel
+```
+
+安装脚本用户使用
+`"$HOME/.local/share/iterm-agents/venv/bin/iterm-agents" --reload-panel`。
+此操作会重置面板的搜索与分组折叠状态，但保留监控进程中的标签和完成标记。
+恢复命令需要监控进程已使用本版本启动，才能发现其地址。
+
+请求超过 8 秒会超时，失败后逐步延长重试间隔；面板保留最近可用的数据，并在数据过期时显示
+**Updates paused**。每 15 秒检查一次 JavaScript 响应；确认可见且处于当前窗口的面板若超过
+60 秒未响应，可自动重建，两次尝试至少间隔 5 分钟。隐藏面板、搜索或编辑期间，以及睡眠唤醒
+后的宽限期内，不会自动重建。JavaScript 检查无法识别所有 GPU 渲染故障，持续空白时请使用
+`--reload-panel`。本机 `/api/diagnostics` 提供扫描时效、后台监控状态与面板响应信息，不包含终端正文。
+
 | 现象 | 检查方法 |
 | --- | --- |
 | 面板未显示或加载失败 | 按 `Cmd+Shift+M` 显示面板；仍有问题时，检查 [Python API 设置](#配置-iterm2)并尝试[手动启动](#手动启动和更新) |

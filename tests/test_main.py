@@ -13,6 +13,15 @@ from iterm_agents.server import DEFAULT_PORT
 
 
 class TestMain:
+    def test_reload_panel_bypasses_the_held_monitor_lock(self) -> None:
+        with (
+            patch("iterm_agents.__main__.iterm2.run_until_complete") as runner,
+            patch("iterm_agents.__main__._acquire_single_instance") as lock,
+        ):
+            main(["--reload-panel"])
+        runner.assert_called_once()
+        lock.assert_not_called()
+
     def test_version_flag_prints_package_version(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as excinfo:
             main(["--version"])

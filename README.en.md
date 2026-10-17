@@ -241,6 +241,29 @@ its pane, and `Escape` to close a menu or return to search.
 
 ## Troubleshooting
 
+If the Agents sidebar is blank or frozen while the monitor is running, rebuild
+its panels without restarting your terminal sessions:
+
+```bash
+uv run iterm-agents --reload-panel
+```
+
+For installer users, use
+`"$HOME/.local/share/iterm-agents/venv/bin/iterm-agents" --reload-panel`.
+This resets panel searches and collapsed groups, while keeping the monitor's
+labels and completion marks. The monitor must have started with this version
+for the recovery command to discover its address.
+
+Requests have an eight-second deadline and failed refreshes retry with backoff.
+The panel keeps its last good cards and shows **Updates paused** when data is
+stale. A lightweight JavaScript health check runs every 15 seconds; a confirmed
+visible, active panel that stops acknowledging it can be rebuilt after 60
+seconds, with a five-minute cooldown. Hidden panels, active searches/edits, and
+sleep/wake grace periods suppress automatic recovery. JavaScript health cannot
+detect every GPU rendering failure; use `--reload-panel` if the sidebar remains
+blank. Local `/api/diagnostics` reports scan freshness, monitor state, and panel
+responsiveness without terminal text.
+
 | Symptom | What to check |
 | --- | --- |
 | Panel missing or failing to load | Press `Cmd+Shift+M`; if it still fails, check the [Python API settings](#set-up-iterm2) and try [manual startup](#manual-startup-and-updates). |

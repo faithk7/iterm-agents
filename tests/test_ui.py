@@ -63,6 +63,7 @@ function makePanel(savedName = '', probeRule = true) {
       location: {protocol: 'http:', host: 'panel'},
       addEventListener(name, fn) {(windowEvents[name] ||= []).push(fn);}, innerHeight: 900,
     },
+    AbortController, clearTimeout() {},
     setInterval() {}, setTimeout(fn, ms) {timeouts.push({fn, ms});},
     WebSocket: class {
       constructor(url) { this.url = url; sources.push(this); }
@@ -107,7 +108,7 @@ function makePanel(savedName = '', probeRule = true) {
     advance: ms => { clock += ms; },
     loseFocus: () => windowEvents.blur.forEach(fn => fn())};
 }
-async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
+async function settle() {for (let i = 0; i < 40; i++) await Promise.resolve();}
 (async () => {
   const a = makePanel();
   assert.ok(!a.requests.includes('/api/panel-window'), 'loading cannot guess the owner');
@@ -283,6 +284,28 @@ async function settle() {for (let i = 0; i < 12; i++) await Promise.resolve();}
   vm.runInContext('pollSessions()', hidden.context);
   await settle();
   assert.equal(polls(), before + 2, 'a visible panel polls every second');
+
+  const stalled = makePanel('iterm-agents:window:w1');
+  await settle();
+  const previousHtml = vm.runInContext("document.getElementById('sessions').innerHTML", stalled.context);
+  stalled.context.fetch = (_url, options) => new Promise((resolve, reject) => {
+    options.signal.addEventListener('abort', () => reject(new Error('request timed out')));
+  });
+  const pending = vm.runInContext('loadSessions()', stalled.context);
+  await settle();
+  stalled.timeouts.at(-1).fn();
+  await pending;
+  assert.equal(vm.runInContext('loadingSessions', stalled.context), false,
+    'a timed-out fetch must release the refresh guard');
+  assert.equal(vm.runInContext("document.getElementById('sessions').innerHTML", stalled.context),
+    previousHtml, 'a transient failure must keep the last good cards');
+  assert.equal(vm.runInContext("document.getElementById('connection-status').hidden", stalled.context), false);
+  stalled.context.fetch = async () => ({json: async () => [
+    {id: 'recovered', name: 'recovered', agent_state: 'idle', window_id: 'w1'},
+  ]});
+  await vm.runInContext('loadSessions(true)', stalled.context);
+  assert.equal(vm.runInContext('allSessions[0].id', stalled.context), 'recovered');
+  assert.equal(vm.runInContext("document.getElementById('connection-status').hidden", stalled.context), true);
 })().catch(error => {console.error(error); process.exitCode = 1;});
 """],
         input=json.dumps(script), text=True, capture_output=True, timeout=10,
@@ -361,6 +384,7 @@ function element(id) {
   return elements.get(id);
 }
 const context = vm.createContext({
+  AbortController, clearTimeout() {},
   document: {
     styleSheets: [],
     hasFocus: () => false,
@@ -384,7 +408,7 @@ const context = vm.createContext({
     return new Promise(() => {});
   },
   setInterval() {},
-  setTimeout: fn => timeouts.push(fn),
+  setTimeout: (fn, ms) => { if (ms !== 8000) timeouts.push(fn); },
   WebSocket: class {
     constructor() {
       listeners['focus-changed'] = e => this.onmessage({data: JSON.stringify({
@@ -561,13 +585,14 @@ assert.ok(element('count').textContent.includes('0 done'));
     assert.equal(writes, before + 1, 'deferred changes must render after the guard clears');
   }
 
-  vm.runInContext('loadingSessions = false', context);
+  vm.runInContext('loadingSessions = false; hasSessionSnapshot = true', context);
   const snapshot = vm.runInContext('JSON.parse(JSON.stringify(allSessions))', context);
   context.fetch = () => Promise.reject(new Error('offline'));
-  await vm.runInContext('loadSessions()', context);
-  assert.ok(element('sessions').innerHTML.includes('Failed to load sessions'));
+  await vm.runInContext('loadSessions(true)', context);
+  assert.ok(element('connection-status').textContent.includes('Updates paused'));
+  assert.ok(element('sessions').innerHTML.includes('new label'));
   context.fetch = () => Promise.resolve({json: async () => snapshot});
-  await vm.runInContext('loadSessions()', context);
+  await vm.runInContext('loadSessions(true)', context);
   assert.ok(!element('sessions').innerHTML.includes('Failed to load sessions'));
   assert.ok(element('sessions').innerHTML.includes('new label'));
 

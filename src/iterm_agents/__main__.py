@@ -15,6 +15,7 @@ import iterm2.connection
 
 from iterm_agents import __version__
 from iterm_agents.autolaunch import install_autolaunch
+from iterm_agents.recovery import reload_panel, write_runtime
 from iterm_agents.server import DEFAULT_PORT, AgentMonitorServer
 
 
@@ -33,6 +34,7 @@ async def _run(connection: iterm2.connection.Connection, port: int) -> None:
     """Build and start the monitor inside the iterm2 connection's event loop."""
     server = AgentMonitorServer(connection, port=port)
     await server.start()
+    write_runtime(server.url)
     print(f"iterm-agents: running ({server.url})")
     print("iterm-agents: Ctrl+C to stop")
 
@@ -62,6 +64,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Install an iTerm2 AutoLaunch wrapper and exit",
     )
     parser.add_argument(
+        "--reload-panel",
+        action="store_true",
+        help="Rebuild blank or stuck Agents panels without restarting the monitor",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite an existing AutoLaunch wrapper when used with --install-autolaunch",
@@ -70,6 +77,13 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.force and not args.install_autolaunch:
         parser.error("--force can only be used with --install-autolaunch")
+    if args.reload_panel and args.install_autolaunch:
+        parser.error("--reload-panel cannot be combined with --install-autolaunch")
+
+    if args.reload_panel:
+        # Recovery must work while the running monitor holds the instance lock.
+        iterm2.run_until_complete(reload_panel)  # type: ignore[attr-defined]
+        return
 
     if args.install_autolaunch:
         result = install_autolaunch(force=args.force)

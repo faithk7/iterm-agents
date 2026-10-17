@@ -60,6 +60,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     cursor: pointer;
   }
   .focus-hint[hidden] { display: none; }
+  .connection-status { color: #d7ba7d; margin-bottom: 8px; font-size: 11px; }
+  .connection-status[hidden] { display: none; }
   /* WebKit resolves :window-inactive from this WebView's own NSWindow, so the
      probe's scrollbar width reveals whether the panel's window is key. */
   #owner-probe {
@@ -239,7 +241,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   <button class="focus-hint" id="focus-hint" onclick="bindPanelWindow()"
           aria-live="polite">Click here to enable the blue focus marker</button>
   <div id="owner-probe" aria-hidden="true"><div style="height: 100px"></div></div>
-  <div id="sessions"></div>
+  <div class="connection-status" id="connection-status" role="status" hidden></div>
+  <div id="sessions"><div class="no-results">Loading sessions…</div></div>
   <div class="count" id="count"></div>
 
   <script>
@@ -256,6 +259,36 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     let panelFocusEpoch = 0;
     let eventsSource = null;
 
+    // Bound the entire request, including JSON decoding. The deadline also
+    // releases callers if a stalled transport fails to honour cancellation.
+    async function panelRequest(url, json = false) {
+      const controller = new AbortController();
+      let timer;
+      try {
+        return await Promise.race([
+          (async () => {
+            const response = await fetch(url, {signal: controller.signal});
+            if (response.ok === false) throw new Error('HTTP ' + response.status);
+            return json ? {response, data: await response.json()} : response;
+          })(),
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => {
+              controller.abort();
+              reject(new Error('Request timed out'));
+            }, 8000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function connectionStatus(message) {
+      const status = document.getElementById('connection-status');
+      if (status.textContent !== message) status.textContent = message;
+      if (status.hidden !== !message) status.hidden = !message;
+    }
+
     function panelUrl(path) {
       return panelWindowId ? path + '?window=' + encodeURIComponent(panelWindowId) : path;
     }
@@ -270,9 +303,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const epoch = panelFocusEpoch;
       bindingWindow = (async () => {
         try {
-          const res = await fetch('/api/panel-window');
-          if (!res.ok) return false;
-          const data = await res.json();
+          const {data} = await panelRequest('/api/panel-window', true);
           // WKWebView's hasFocus() can stay false after a real click. A blur
           // during the handshake, rather than that flag, invalidates ownership.
           if (!data.window_id || epoch !== panelFocusEpoch ||
@@ -316,7 +347,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     let ownerWasKey = false;
     let lastOwnerProbeAt = -Infinity;
     function checkOwnerWindow() {
-      if (!ownerProbeSupported || bindingWindow) return;
+      if (document.hidden || !ownerProbeSupported || bindingWindow) return;
       // First binding stays fast; afterwards this only repairs ownership.
       // Pane markers arrive over the event connection and never wait on the scrollbar probe.
       const now = Date.now();
@@ -551,7 +582,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     async function markSessionRead(sessionId) {
       try {
-        await fetch('/api/clear?session=' + encodeURIComponent(sessionId));
+        await panelRequest('/api/clear?session=' + encodeURIComponent(sessionId));
       } catch(e) {}
       acknowledgeCard(sessionId);
     }
@@ -610,7 +641,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     async function saveLabel(sessionId, label) {
       try {
-        await fetch('/api/label?session=' + encodeURIComponent(sessionId) +
+        await panelRequest('/api/label?session=' + encodeURIComponent(sessionId) +
                     '&label=' + encodeURIComponent(label));
       } catch(e) {}
       closeLabelEditor();
@@ -636,8 +667,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     let loadingSessions = false;
     let reloadSessionsPending = false;
+    let hasSessionSnapshot = false;
+    let sessionFailures = 0;
+    let nextSessionRetryAt = 0;
+    let lastSuccessfulPollAt = 0;
 
     async function loadSessions(force) {
+      if (!force && Date.now() < nextSessionRetryAt) return;
       if (loadingSessions) {
         reloadSessionsPending = true;
         return;
@@ -646,8 +682,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const requestedWindowId = panelWindowId;
       try {
         const url = panelUrl('/api/sessions');
-        const res = await fetch(url + (url.includes('?') ? '&' : '?') + 'cached=1');
-        const sessions = await res.json();
+        const {response: res, data: sessions} = await panelRequest(
+          url + (url.includes('?') ? '&' : '?') + 'cached=1', true);
+        if (!Array.isArray(sessions)) throw new Error('Invalid session snapshot');
         // An unbound request may finish after the first-click handshake.
         if (requestedWindowId !== panelWindowId) return;
         // Old rows can predate this window. Only the native window snapshot
@@ -662,11 +699,20 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         }
         allSessions = sessions;
         filterSessions(force);
+        hasSessionSnapshot = true;
+        sessionFailures = 0;
+        nextSessionRetryAt = 0;
+        lastSuccessfulPollAt = Date.now();
+        connectionStatus(res.headers?.get('X-Agents-Stale') === '1'
+          ? 'Updates paused. Showing the last available statuses.' : '');
       } catch(e) {
-        lastRenderedInput = '';
-        lastRenderedHtml = '';
-        document.getElementById('sessions').innerHTML =
-          '<div class="no-results">Failed to load sessions<br>' + esc(String(e)) + '</div>';
+        sessionFailures++;
+        nextSessionRetryAt = Date.now() + Math.min(15000, 1000 * 2 ** (sessionFailures - 1));
+        connectionStatus('Updates paused. Reconnecting…');
+        if (!hasSessionSnapshot) {
+          document.getElementById('sessions').innerHTML =
+            '<div class="no-results">Waiting for sessions…</div>';
+        }
       } finally {
         loadingSessions = false;
         // Binding or a scan update can arrive during the first fetch. Retry
@@ -858,7 +904,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     async function clearAllDone() {
       try {
-        await fetch('/api/clear');
+        await panelRequest('/api/clear');
         await loadSessions(true);
       } catch(e) {}
     }
@@ -867,7 +913,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       // Bind the source panel before a card click can activate another window.
       if (!panelWindowId) await bindPanelWindow();
       try {
-        await fetch('/api/focus?session=' + encodeURIComponent(sessionId));
+        await panelRequest('/api/focus?session=' + encodeURIComponent(sessionId));
       } catch(e) {}
       // Patch the card in place — the marker arrives via the event connection and the poll
       // confirms the rest; a forced rewrite churns the node under the cursor.
@@ -947,6 +993,17 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       });
       es.addEventListener('sessions-changed', () => {
         if (eventsSource === es) loadSessions();
+      });
+      // Application acknowledgements establish JS responsiveness, not GPU
+      // health. Hidden/suspended pages are never assumed to be broken.
+      es.addEventListener('health-check', () => {
+        if (eventsSource !== es) return;
+        es.socket.send(JSON.stringify({
+          event: 'panel-health', visible: !document.hidden,
+          busy: !!(pointerDown || labelEditorOpen || ctxMenu ||
+            document.getElementById('search').value),
+          data_age_ms: lastSuccessfulPollAt ? Date.now() - lastSuccessfulPollAt : null,
+        }));
       });
       es.onerror = () => {
         if (eventsSource !== es) return;

@@ -250,7 +250,9 @@ class TestAgentMonitorServer:
                 }
                 await socket.close()
             async with client.get(site.make_url("/api/diagnostics")) as response:
-                assert await response.json() == {"event_streams": 0, "websocket_panels": 0}
+                diagnostics = await response.json()
+                assert diagnostics["event_streams"] == 0
+                assert diagnostics["websocket_panels"] == 0
             restored = await client.ws_connect(site.make_url("/api/ws?window=w1"))
             assert (await restored.receive_json(timeout=1))["data"]["focused"] == ["s-3"]
             await restored.close()
@@ -1189,3 +1191,46 @@ class TestAgentMonitorServer:
 
         release_scan.set()
         await asyncio.wait_for(scan_task, timeout=1)
+
+
+async def test_scan_timeout_preserves_snapshot_and_allows_next_scan(monkeypatch):
+    server = AgentMonitorServer(connection=None)
+    server._SCAN_TIMEOUT = 0.01
+    server._scan_cache = (1.0, [{"id": "previous"}])
+
+    async def hanging_scan():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(server, "_scan_sessions", hanging_scan)
+    response = await asyncio.wait_for(server._handle_sessions(None), 0.2)
+    assert json.loads(response.text)[0]["id"] == "previous"
+    assert response.headers["X-Agents-Stale"] == "1"
+    assert not server._scan_lock.locked()
+    monkeypatch.setattr(server, "_scan_sessions", AsyncMock(return_value=[{"id": "new"}]))
+    response = await server._handle_sessions(None)
+    assert json.loads(response.text)[0]["id"] == "new"
+    assert response.headers["X-Agents-Stale"] == "0"
+
+
+async def test_supervisor_restarts_failed_monitor_and_cancels_cleanly():
+    server = AgentMonitorServer(connection=None)
+    server._MONITOR_RETRY_DELAY = 0.001
+    recovered = asyncio.Event()
+    attempts = 0
+
+    async def monitor():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary disconnect")
+        recovered.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(server._supervise_monitor("test", monitor))
+    try:
+        await asyncio.wait_for(recovered.wait(), 0.2)
+        assert attempts == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert attempts == 2

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
 import time
 import weakref
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import iterm2
@@ -25,6 +24,7 @@ from aiohttp import web
 from iterm_agents.detector import detect_agents
 from iterm_agents.git_info import get_git_info
 from iterm_agents.models import AgentInfo, AgentState, AgentType, GitInfo, SessionRow
+from iterm_agents.recovery import register_panel
 from iterm_agents.screen_signals import (
     cursor_activity_signature,
     cursor_turn_is_live,
@@ -74,6 +74,12 @@ class AgentMonitorServer:
     _SCAN_CACHE_TTL = 0.9
     _SCAN_RPC_CONCURRENCY = 4
     _GIT_CACHE_TTL = 5.0
+    _SCAN_TIMEOUT = 6.0
+    _MONITOR_RETRY_DELAY = 1.0
+    _STALE_AFTER = 15.0
+    _HEALTH_INTERVAL = 15.0
+    _PANEL_TIMEOUT = 60.0
+    _RECOVERY_COOLDOWN = 300.0
 
     def __init__(
         self,
@@ -122,6 +128,18 @@ class AgentMonitorServer:
         self._session_window_ids: dict[str, str] = {}
         self._sessions_by_id: dict[str, iterm2.session.Session] = {}
         self._detached_tasks: set[asyncio.Task[None]] = set()
+        self._scan_error: str | None = None
+        self._scan_started_at: float | None = None
+        self._monitor_states: dict[str, str] = {}
+        self._health_task: asyncio.Task[None] | None = None
+        self._panel_health: weakref.WeakKeyDictionary[web.StreamResponse, dict[str, Any]] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._last_panel_recovery = -float("inf")
+        self._panel_recoveries = 0
+        self._panel_recovery_candidate: tuple[str, float] | None = None
+        self._runner: web.AppRunner | None = None
+        self._git_tasks: dict[str, asyncio.Task[GitInfo]] = {}
 
     @property
     def url(self) -> str:
@@ -142,22 +160,75 @@ class AgentMonitorServer:
         app.router.add_get("/api/diagnostics", self._handle_diagnostics)
 
         runner = web.AppRunner(app)
+        self._runner = runner
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         self.port = _resolve_bound_port(runner.addresses)
 
-        await iterm2.tool.async_register_web_view_tool(
-            self.connection,
-            display_name="Agents",
-            identifier="dev.iterm-agents.monitor",
-            reveal_if_already_registered=True,
-            url=self.url + "?v=" + hashlib.sha256(AGENT_MONITOR_HTML.encode()).hexdigest()[:12],
-        )
+        await register_panel(self.connection, self.url)
 
         self._toolbelt_ready_windows.update(await self._ensure_toolbelts_visible(None))
-        self._keystroke_task = asyncio.create_task(self._monitor_keystroke())
-        self._focus_task = asyncio.create_task(self._monitor_focus_changes())
+        self._keystroke_task = asyncio.create_task(
+            self._supervise_monitor("keyboard", self._monitor_keystroke)
+        )
+        self._focus_task = asyncio.create_task(
+            self._supervise_monitor("focus", self._monitor_focus_changes)
+        )
+        self._health_task = asyncio.create_task(
+            self._supervise_monitor("panels", self._monitor_panel_health)
+        )
+
+    async def stop(self) -> None:
+        """Cancel workers and close clients before releasing the listening port."""
+        tasks = set(self._detached_tasks)
+        # A timed-out scan must not launch another thread for a Git read that
+        # is still blocked on disk. Keep these jobs shared until completion.
+        for git_task in self._git_tasks.values():
+            git_task.cancel()
+        await asyncio.gather(*self._git_tasks.values(), return_exceptions=True)
+        tasks.update(
+            task
+            for task in (
+                self._keystroke_task,
+                self._focus_task,
+                self._health_task,
+                self._focus_worker_task,
+                self._focus_refresh_task,
+                self._scan_refresh_task,
+            )
+            if task is not None
+        )
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for client in list(self._sse_clients):
+            if isinstance(client, web.WebSocketResponse):
+                await client.close()
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
+
+    async def _supervise_monitor(
+        self, name: str, monitor: Callable[[], Coroutine[Any, Any, None]]
+    ) -> None:
+        """Transient monitor failures must not silently disable a feature."""
+        delay = self._MONITOR_RETRY_DELAY
+        while True:
+            self._monitor_states[name] = "running"
+            started = time.monotonic()
+            try:
+                await monitor()
+            except asyncio.CancelledError:
+                self._monitor_states[name] = "stopped"
+                raise
+            except Exception as error:
+                print(f"iterm-agents: {name} monitor restarting ({type(error).__name__})")
+            self._monitor_states[name] = "retrying"
+            if time.monotonic() - started > 60:
+                delay = self._MONITOR_RETRY_DELAY
+            await asyncio.sleep(delay)
+            delay = min(30, delay * 2)
 
     async def _ensure_toolbelt_visible(self) -> None:
         """Show the Toolbelt in the key window if it's not already visible.
@@ -338,7 +409,12 @@ class AgentMonitorServer:
         """Run a coroutine detached, keeping a reference until it completes."""
         task = asyncio.create_task(coro)
         self._detached_tasks.add(task)
-        task.add_done_callback(self._detached_tasks.discard)
+        task.add_done_callback(self._detached_done)
+
+    def _detached_done(self, task: asyncio.Task[None]) -> None:
+        self._detached_tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            print(f"iterm-agents: background task failed ({type(error).__name__})")
 
     def _patch_focused_session(self, session_id: str, *, select_tab: bool = False) -> bool:
         """Move the marker to a newly active session without any RPC.
@@ -488,10 +564,12 @@ class AgentMonitorServer:
     ) -> None:
         payload = {} if data is None else data
         if isinstance(client, web.WebSocketResponse):
-            await client.send_json({"event": event, "data": payload})
+            await asyncio.wait_for(client.send_json({"event": event, "data": payload}), timeout=2)
         else:
             # Older pages may reconnect before iTerm reloads their HTML.
-            await client.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode())
+            await asyncio.wait_for(
+                client.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode()), timeout=2
+            )
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         """Push events without occupying WebKit's finite HTTP request slots."""
@@ -499,15 +577,100 @@ class AgentMonitorServer:
         await response.prepare(request)
         self._sse_clients.add(response)
         self._sse_window_ids[response] = request.query.get("window", "")
+        self._panel_health[response] = {
+            "seen": time.monotonic(),
+            "visible": False,
+            "busy": False,
+            "data_age_ms": None,
+        }
         try:
             await self._broadcast_focus()
-            async for _message in response:
-                pass
+            async for message in response:
+                if message.type != web.WSMsgType.TEXT:
+                    continue
+                try:
+                    data = message.json()
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(data, dict) and data.get("event") == "panel-health":
+                    age = data.get("data_age_ms")
+                    self._panel_health[response] = {
+                        "seen": time.monotonic(),
+                        "visible": data.get("visible") is True,
+                        "busy": data.get("busy") is True,
+                        "data_age_ms": age if isinstance(age, (int, float)) and age >= 0 else None,
+                    }
         finally:
             self._sse_clients.discard(response)
             self._sse_window_ids.pop(response, None)
             self._sse_focus_ids.pop(response, None)
+            self._panel_health.pop(response, None)
         return response
+
+    async def _monitor_panel_health(self) -> None:
+        """Probe JS at low frequency; a live socket alone proves no UI health."""
+        previous_tick = time.monotonic()
+        while True:
+            await asyncio.sleep(self._HEALTH_INTERVAL)
+            now = time.monotonic()
+            await self._check_panel_health(now, previous_tick)
+            previous_tick = now
+            await self._broadcast_sse("health-check")
+
+    async def _check_panel_health(self, now: float, previous_tick: float) -> None:
+        # Sleep/wake or a suspended event loop must get a new grace period.
+        if now - previous_tick > self._HEALTH_INTERVAL * 3:
+            self._panel_recovery_candidate = None
+            for health in self._panel_health.values():
+                health["seen"] = now
+            return
+        if now - self._last_panel_recovery < self._RECOVERY_COOLDOWN:
+            return
+        panels = [
+            (self._sse_window_ids.get(client, ""), health)
+            for client, health in list(self._panel_health.items())
+            if client in self._sse_clients
+        ]
+        # Registration can rebuild all panels. Never discard an active edit,
+        # search, or a panel known to be hidden; only repair a confirmed owner.
+        if any(health["busy"] for _, health in panels):
+            self._panel_recovery_candidate = None
+            return
+        stalled = {
+            owner
+            for owner, health in panels
+            if owner and health["visible"] and now - health["seen"] > self._PANEL_TIMEOUT
+        }
+        if not stalled:
+            self._panel_recovery_candidate = None
+            return
+        owner = await asyncio.wait_for(self._current_window_id(), timeout=3)
+        if owner not in stalled:
+            self._panel_recovery_candidate = None
+            return
+        if _SHOW_TOOLBELT_ID is None:
+            return
+        state = await asyncio.wait_for(
+            iterm2.mainmenu.MainMenu.async_get_menu_item_state(self.connection, _SHOW_TOOLBELT_ID),
+            timeout=3,
+        )
+        if not state.enabled or not state.checked:
+            self._panel_recovery_candidate = None
+            return
+        # Give a newly foregrounded WebView a complete probe/ack round trip
+        # before repairing it, even if its old visibility report was stale.
+        candidate = self._panel_recovery_candidate
+        if candidate is None or candidate[0] != owner:
+            self._panel_recovery_candidate = (owner, now)
+            return
+        if now - candidate[1] < self._HEALTH_INTERVAL:
+            return
+        self._panel_recovery_candidate = None
+        # Reserve the cooldown before calling iTerm so failures cannot loop.
+        self._last_panel_recovery = now
+        await register_panel(self.connection, self.url, rebuild=True)
+        self._panel_recoveries += 1
+        print("iterm-agents: rebuilt unresponsive Agents panels")
 
     async def _handle_sse(self, request: web.Request) -> web.StreamResponse:
         """SSE endpoint for pushing events to the WebView."""
@@ -563,10 +726,28 @@ class AgentMonitorServer:
     async def _handle_diagnostics(self, request: web.Request) -> web.Response:
         """Local transport counts, without session names or terminal content."""
         sockets = sum(isinstance(client, web.WebSocketResponse) for client in self._sse_clients)
+        now = time.monotonic()
         return web.json_response(
             {
+                "service": "iterm-agents",
                 "event_streams": len(self._sse_clients) - sockets,
                 "websocket_panels": sockets,
+                "scan_age_seconds": now - self._scan_cache[0] if self._scan_cache[0] else None,
+                "scan_in_progress_seconds": (
+                    now - self._scan_started_at if self._scan_started_at is not None else None
+                ),
+                "scan_error": self._scan_error,
+                "monitors": dict(self._monitor_states),
+                "panel_recoveries": self._panel_recoveries,
+                "panels": [
+                    {
+                        "js_age_seconds": now - health["seen"],
+                        "visible": health["visible"],
+                        "data_age_ms": health["data_age_ms"],
+                    }
+                    for client, health in list(self._panel_health.items())
+                    if client in self._sse_clients
+                ],
             }
         )
 
@@ -589,16 +770,24 @@ class AgentMonitorServer:
             fresh = False
             if timestamp == 0.0 or time.monotonic() - timestamp > self._SCAN_CACHE_TTL:
                 try:
-                    raw = await self._scan_sessions()
+                    self._scan_started_at = time.monotonic()
+                    raw = await asyncio.wait_for(self._scan_sessions(), timeout=self._SCAN_TIMEOUT)
                 except Exception as error:
+                    failure = type(error).__name__
+                    if self._scan_error != failure:
+                        print(f"iterm-agents: session scan unavailable ({failure})")
+                    self._scan_error = failure
                     self._session_state.invalidate_observations()
                     if timestamp == 0.0:
                         raise web.HTTPServiceUnavailable(text="Session scan unavailable") from error
                     # Serve the previous display state; retry on the next poll.
                 else:
+                    self._scan_error = None
                     timestamp = time.monotonic()
                     self._scan_cache = (timestamp, raw)
                     fresh = True
+                finally:
+                    self._scan_started_at = None
             response = self._sessions_response(request, fresh=fresh)
             if fresh:
                 self._spawn_detached(self._broadcast_sse("sessions-changed"))
@@ -614,7 +803,7 @@ class AgentMonitorServer:
             return
         self._scan_refresh_task = asyncio.create_task(self._refresh_sessions())
         self._detached_tasks.add(self._scan_refresh_task)
-        self._scan_refresh_task.add_done_callback(self._detached_tasks.discard)
+        self._scan_refresh_task.add_done_callback(self._detached_done)
 
     async def _refresh_sessions(self) -> None:
         await self._handle_sessions(None)
@@ -637,7 +826,14 @@ class AgentMonitorServer:
         if window_id and self._window_ids is not None:
             owner = "present" if window_id in self._window_ids else "missing"
         return web.json_response(
-            sessions, headers={"X-Agents-Window": owner, "Cache-Control": "no-store"}
+            sessions,
+            headers={
+                "X-Agents-Window": owner,
+                "X-Agents-Stale": "1"
+                if (self._scan_error or time.monotonic() - timestamp > self._STALE_AFTER)
+                else "0",
+                "Cache-Control": "no-store",
+            },
         )
 
     async def _scan_sessions(self) -> list[SessionRow]:
@@ -746,7 +942,15 @@ class AgentMonitorServer:
         cached = self._git_cache.get(path)
         if cached is not None and now - cached[0] < self._GIT_CACHE_TTL:
             return cached[1]
-        info = await asyncio.to_thread(get_git_info, path)
+        task = self._git_tasks.get(path)
+        if task is None:
+            task = asyncio.create_task(asyncio.to_thread(get_git_info, path))
+            self._git_tasks[path] = task
+        try:
+            info = await asyncio.shield(task)
+        finally:
+            if task.done():
+                self._git_tasks.pop(path, None)
         self._git_cache[path] = (now, info)
         return info
 

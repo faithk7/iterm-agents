@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import shutil
 import subprocess
@@ -125,6 +126,71 @@ for (let i = 1; i < 6; i++) {
         assert int(elapsed[1]) < 1000, output.decode()
         print(f"Native WebKit, six panel connections: card request {int(elapsed[1])} ms")
         server._activate_session.assert_awaited_once_with("s-1")
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        await runner.cleanup()
+        await asyncio.gather(*server._detached_tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("stall", ["fetch", "body"])
+async def test_webkit_deadline_preserves_cards_and_recovers(webkit_probe: Path, stall: str) -> None:
+    """Exercise real browser timers, including a response body that never arrives."""
+    server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+    rows = [{"id": "s-1", "name": "agent", "window_id": "w1", "agent_state": "idle"}]
+    server._scan_cache = (time.monotonic(), rows)
+    html = AGENT_MONITOR_HTML.replace(
+        "}, 8000);", "}, window.testRequestDeadline || 8000);"
+    ).replace(
+        "</body>", r'''
+<script>
+window.addEventListener('error', e => window.webkit.messageHandlers.result.postMessage('ERROR ' + e.message));
+window.addEventListener('unhandledrejection', e => window.webkit.messageHandlers.result.postMessage('ERROR ' + e.reason));
+const ready = setInterval(async () => {
+  if (!document.querySelector('.agent')) return;
+  clearInterval(ready);
+  const originalFetch = window.fetch;
+  const card = document.querySelector('.agent');
+  window.testRequestDeadline = 50;
+  window.fetch = () => STALL === 'fetch'
+    ? new Promise(() => {})
+    : Promise.resolve({ok: true, json: () => new Promise(() => {})});
+  await loadSessions(true);
+  if (loadingSessions || document.querySelector('.agent') !== card ||
+      document.getElementById('connection-status').hidden) {
+    window.webkit.messageHandlers.result.postMessage('DONE failed deadline');
+    return;
+  }
+  window.fetch = originalFetch;
+  window.testRequestDeadline = 8000;
+  await loadSessions(true);
+  const recovered = !document.getElementById('connection-status').hidden
+    ? 'failed recovery' : 'recovered';
+  window.webkit.messageHandlers.result.postMessage('DONE ' + recovered);
+}, 10);
+</script></body>'''.replace("STALL", json.dumps(stall)),
+    )
+    app = web.Application()
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(text=html, content_type="text/html")
+
+    app.router.add_get("/", page)
+    app.router.add_get("/api/sessions", server._handle_sessions)
+    app.router.add_get("/api/ws", server._handle_ws)
+    runner = web.AppRunner(app, shutdown_timeout=0.1)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    process = await asyncio.create_subprocess_exec(
+        str(webkit_probe), f"http://127.0.0.1:{runner.addresses[0][1]}/",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        output, errors = await asyncio.wait_for(process.communicate(), 15)
+        assert process.returncode == 0, output.decode() + errors.decode()
+        assert b"DONE recovered" in output, output.decode() + errors.decode()
     finally:
         if process.returncode is None:
             process.kill()
