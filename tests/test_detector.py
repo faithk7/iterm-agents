@@ -49,6 +49,28 @@ class TestIsAgentProcess:
         assert _is_claude_process("claude")
         assert _is_claude_process("/usr/local/bin/claude")
 
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("/Users/test/.local/share/claude/versions/2.1.302", True),
+            ("/Users/test/.local/share/claude/versions/2.1.302 --resume", True),
+            ("/opt/claude/versions/3.0.0-beta.1+build.42", True),
+            ("node /opt/node_modules/@anthropic-ai/claude-code/cli.js --resume", True),
+            ("/opt/bin/node /opt/node_modules/@anthropic-ai/claude-code/cli.js", True),
+            ("/opt/other/versions/2.1.302", False),
+            ("/opt/claude/versions/helper", False),
+            ("/opt/claude/versions/2.1.302/helper", False),
+            ("echo /Users/test/.local/share/claude/versions/2.1.302", False),
+            ("node /opt/node_modules/other/claude-code/cli.js", False),
+            ("node -e /opt/node_modules/@anthropic-ai/claude-code/cli.js", False),
+            ("node --eval=/opt/node_modules/@anthropic-ai/claude-code/cli.js", False),
+            ("echo node /opt/node_modules/@anthropic-ai/claude-code/cli.js", False),
+        ],
+    )
+    def test_native_claude_executable(self, command: str, expected: bool) -> None:
+        assert _is_claude_process(command) is expected
+        assert _is_agent_process(command) is expected
+
     def test_codex(self) -> None:
         assert _is_codex_process("codex")
         assert _is_codex_process("/home/user/.local/bin/codex")
@@ -519,3 +541,24 @@ class TestDetectAgents:
             ]
         )
         assert _detect_claude_state(_build_children(table), 20) == AgentState.RUNNING
+
+    @pytest.mark.parametrize("busy", [False, True])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "/Users/test/.local/share/claude/versions/2.1.302",
+            "node /opt/node_modules/@anthropic-ai/claude-code/cli.js",
+        ],
+    )
+    def test_claude_launch_is_associated_with_session(self, busy: bool, command: str) -> None:
+        table = _make_table(
+            [(10, 1, "zsh"), (20, 10, command), (21, 20, command), (40, 1, command)]
+        )
+        if busy:
+            table[30] = ProcessInfo(30, 20, "caffeinate -dims")
+        with patch("iterm_agents.detector._build_process_table", return_value=table):
+            [agent] = detect_agents({10})
+        assert agent.agent_type is AgentType.CLAUDE
+        assert agent.pid == 20
+        assert agent.session_pid == 10
+        assert agent.state is (AgentState.RUNNING if busy else AgentState.IDLE)

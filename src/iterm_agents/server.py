@@ -969,7 +969,10 @@ class AgentMonitorServer:
         if agent is not None and agent.state in (AgentState.IDLE, AgentState.UNKNOWN):
             if agent.agent_type is AgentType.CURSOR:
                 agent_state = await self._cursor_state_from_screen(session, agent_state)
-            elif agent.agent_type in (AgentType.DEVIN, AgentType.CODEX, AgentType.KIMI):
+            # shortcut: Claude screens confirm known turns; never-started turns need events.
+            elif agent.agent_type is not AgentType.CLAUDE or self._session_state.was_running(
+                session.session_id, agent.agent_type.value, agent.pid
+            ):
                 agent_state = await self._screen_hint_state(session, agent.agent_type, agent_state)
 
         return {
@@ -1070,8 +1073,10 @@ class AgentMonitorServer:
         async with self._scan_rpc_gate:
             try:
                 screen = await session.async_get_screen_contents()
+                # iTerm uses NULs for blank terminal cells.
                 return "\n".join(
-                    screen.line(index).string for index in range(screen.number_of_lines)
+                    screen.line(index).string.replace("\0", " ")
+                    for index in range(screen.number_of_lines)
                 )
             except Exception:
                 return None
@@ -1084,7 +1089,7 @@ class AgentMonitorServer:
     ) -> str:
         """Upgrade an idle session while its live-turn hint is on screen."""
         text = await self._screen_text(session)
-        if text is None and agent_type is AgentType.CODEX:
+        if text is None and agent_type in (AgentType.CLAUDE, AgentType.CODEX):
             return AgentState.UNKNOWN.value
         if text is not None and screen_shows_active_turn(agent_type, text):
             return AgentState.RUNNING.value

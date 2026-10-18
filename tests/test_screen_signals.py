@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from iterm_agents.models import AgentType
 from iterm_agents.screen_signals import (
     cursor_activity_signature,
@@ -245,6 +247,57 @@ class TestCodexScreenShowsActiveTurn:
             ]
         )
         assert not screen_shows_active_turn(AgentType.DEVIN, screen)
+
+
+class TestClaudeScreenShowsActiveTurn:
+    @pytest.mark.parametrize(
+        "status",
+        [
+            "✻ Symbioting… (3m 14s · ↓ 3.4k tokens)",
+            "✢ Actioning... (5s · ↑ 12 tokens)",
+            "✶ Thinking… (1m 2s · ↓ 1.2k tokens · esc to interrupt)",
+            "✻ Symbioting…\n  (3m 14s · ↓ 3.4k tokens)",
+        ],
+    )
+    def test_live_footer(self, status: str) -> None:
+        screen = "\n".join(
+            [
+                status,
+                "  └ Tip: Use /btw",
+                "    for a side question",
+                "",
+                "──────",
+                "\u276f ",
+                "──────",
+                "  ⏵⏵ bypass permissions on",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.CLAUDE, screen)
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            "✻ Crunched for 25s · done 12:51",
+            "✻ Thinking about the change",
+            'print("✻ Symbioting… (3m 14s · ↓ 3.4k tokens)")',
+        ],
+    )
+    def test_idle_and_transcript_quotes(self, status: str) -> None:
+        screen = f"{status}\n\n──────\n\u276f \n──────\n? for shortcuts"
+        assert not screen_shows_active_turn(AgentType.CLAUDE, screen)
+
+    def test_older_busy_line_does_not_override_completion(self) -> None:
+        screen = (
+            "✻ Symbioting… (3m 14s · ↓ 3.4k tokens)\n"
+            "✻ Crunched for 25s · done 12:51\n\n──────\n\u276f \n──────"
+        )
+        assert not screen_shows_active_turn(AgentType.CLAUDE, screen)
+
+    def test_missing_composer_and_distant_status_are_ignored(self) -> None:
+        busy = "✻ Symbioting… (3m 14s · ↓ 3.4k tokens)"
+        assert not screen_shows_active_turn(AgentType.CLAUDE, busy)
+        screen = "\n".join([busy, *["transcript"] * 20, "──────", "\u276f ", "──────"])
+        assert not screen_shows_active_turn(AgentType.CLAUDE, screen)
 
 
 class TestKimiScreenShowsActiveTurn:

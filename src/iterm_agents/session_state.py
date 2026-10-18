@@ -115,6 +115,12 @@ class SessionStateTracker:
         }
         return sessions
 
+    def was_running(self, session_id: str, agent_type: str, pid: int) -> bool:
+        """Whether the same agent process was last observed running."""
+        return self._last_agent_states.get(session_id) == "running" and self._agent_keys.get(
+            session_id
+        ) == (agent_type, pid)
+
     def invalidate_observations(self) -> None:
         """Interrupt idle confirmation after a failed scan, retaining display state."""
         self._idle_since.clear()

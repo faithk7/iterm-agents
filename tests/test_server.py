@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from iterm_agents.detector import AgentType, GitInfo, ProcessInfo, detect_agents
-from iterm_agents.models import SessionRow
+from iterm_agents.models import AgentInfo, AgentState, SessionRow
 from iterm_agents.server import DEFAULT_HOST, AgentMonitorServer, _resolve_bound_port
 
 
@@ -717,6 +717,78 @@ class TestAgentMonitorServer:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
         server._screen_text = AsyncMock(return_value=None)
         assert await server._screen_hint_state(_Session(""), AgentType.CODEX, "idle") == "unknown"
+
+    async def test_claude_screen_fallback_and_failed_read(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        session = _Session(
+            "✻\0Symbioting… (3m 14s · ↓ 3.4k tokens)\n"
+            "\0\0└ Tip: Use /btw\n──────\n\0\u276f \n──────\n"
+            "\0\0⏵⏵ bypass permissions on"
+        )
+        session.name = "Claude"
+        agent = AgentInfo(AgentType.CLAUDE, AgentState.IDLE, 20, 10)
+        server._session_state.apply(
+            [
+                {
+                    "id": session.session_id,
+                    "agent_type": "claude",
+                    "agent_pid": 20,
+                    "agent_state": "running",
+                }
+            ]
+        )
+        row = await server._session_row(10, session, "", agent, False, None)
+        assert row["agent_state"] == "running"
+
+        session._text = "✻ Crunched for 25s · done 12:51\n──────\n\u276f \n──────"
+        row = await server._session_row(10, session, "", agent, False, None)
+        assert row["agent_state"] == "idle"
+
+        server._screen_text = AsyncMock(return_value=None)
+        server._session_state.apply([{**row, "agent_state": "running"}])
+        row = await server._session_row(10, session, "", agent, False, None)
+        assert row["agent_state"] == "unknown"
+        assert server._session_state.apply([row])[0]["agent_state"] == "running"
+
+        agent.state = AgentState.RUNNING
+        row = await server._session_row(10, session, "", agent, False, None)
+        assert row["agent_state"] == "running"
+
+    @pytest.mark.parametrize("state", [AgentState.IDLE, AgentState.RUNNING])
+    async def test_claude_steady_scans_skip_screen_requests(self, state: AgentState) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._screen_text = AsyncMock(return_value="")
+        sessions = [_ScanSession(index + 10) for index in range(18)]
+        for _ in range(2):
+            rows = []
+            for index, session in enumerate(sessions):
+                agent = AgentInfo(AgentType.CLAUDE, state, index + 20, index + 10)
+                row = await server._session_row(index + 10, session, "", agent, False, None)
+                assert row["agent_state"] == state.value
+                rows.append(row)
+            server._session_state.apply(rows)
+        server._screen_text.assert_not_awaited()
+
+    async def test_claude_completion_is_checked_once_and_new_pid_skips_check(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._screen_text = AsyncMock(return_value="──────\n\u276f \n──────")
+        session = _Session("")
+        session.name = "Claude"
+        agent = AgentInfo(AgentType.CLAUDE, AgentState.RUNNING, 20, 10)
+        running = await server._session_row(10, session, "", agent, False, None)
+        server._session_state.apply([running])
+        agent.state = AgentState.IDLE
+        idle = await server._session_row(10, session, "", agent, False, None)
+        assert idle["agent_state"] == "idle"
+        server._session_state.apply([idle])
+        await server._session_row(10, session, "", agent, False, None)
+        server._screen_text.assert_awaited_once()
+
+        server._session_state.apply([running])
+        agent.pid = 21
+        idle = await server._session_row(10, session, "", agent, False, None)
+        assert idle["agent_state"] == "idle"
+        server._screen_text.assert_awaited_once()
 
     async def test_codex_screen_hint_can_override_failed_assertion_read(self) -> None:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]

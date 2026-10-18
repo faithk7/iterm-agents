@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import subprocess
 from collections import deque
 
@@ -107,7 +108,26 @@ def _executable_name(command: str) -> str:
 
 def _is_claude_process(command: str) -> bool:
     """True for the Claude Code CLI."""
-    return _executable_name(command) == "claude"
+    executable = _executable_token(command)
+    name = _comm_basename(executable)
+    if name == "claude":
+        return True
+    if "/claude/versions/" in executable:
+        return (
+            re.fullmatch(
+                r".*/claude/versions/[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+                executable,
+            )
+            is not None
+        )
+    if name not in {"node", "nodejs"}:
+        return False
+    args = command.split(None, 2)
+    return (
+        len(args) > 1
+        and not args[1].startswith("-")
+        and args[1].endswith("/@anthropic-ai/claude-code/cli.js")
+    )
 
 
 def _is_codex_process(command: str) -> bool:
@@ -148,6 +168,8 @@ def _classify(command: str) -> AgentType | None:
     agent_type = _EXECUTABLE_AGENT_TYPES.get(_executable_name(command))
     if agent_type is not None:
         return agent_type
+    if _is_claude_process(command):
+        return AgentType.CLAUDE
     if _is_cursor_agent(command):
         return AgentType.CURSOR
     return None

@@ -15,7 +15,7 @@ finished, then click through to that pane.
 
 | Agent        | Detected process                                     |
 | ------------ | ---------------------------------------------------- |
-| Claude Code  | `claude`                                             |
+| Claude Code  | `claude`, native `claude/versions/<version>`, or Node on `@anthropic-ai/claude-code/cli.js` |
 | Codex        | `codex`                                              |
 | Cursor Agent | `cursor-agent` (or `node`/`agent` on its `index.js`) |
 | Devin CLI    | `devin`                                              |
@@ -288,6 +288,12 @@ port, use `uv run iterm-agents --port 50123`; choose an unused port.
 Local CLI processes identify agent sessions. Child processes, system activity
 signals, and terminal screen hints indicate whether a turn is running. A
 transition from running to idle produces a **done** mark.
+
+Claude uses its `caffeinate` child as running evidence. When a known running
+turn loses that signal, the live spinner and elapsed timer above its input box
+can keep it running. Settled idle sessions need no screen polling; turns that
+never spawn `caffeinate` are not detected by this fallback. Failed screen reads
+keep the previous state rather than marking a turn done.
 
 Screen hints currently match English text only and may change between CLI
 versions. Remote agents over SSH and desktop apps are not supported. See

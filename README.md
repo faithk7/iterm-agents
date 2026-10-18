@@ -12,7 +12,7 @@
 
 | 智能体 | 检测的进程 |
 | --- | --- |
-| Claude Code | `claude` |
+| Claude Code | `claude`、原生 `claude/versions/<version>`，或运行 `@anthropic-ai/claude-code/cli.js` 的 Node |
 | Codex | `codex` |
 | Cursor Agent | `cursor-agent`（或运行其 `index.js` 的 `node` / `agent`） |
 | Devin CLI | `devin` |
@@ -223,6 +223,8 @@ uv run iterm-agents --version
 ## 检测原理
 
 通过本地 CLI 进程识别智能体会话，再结合子进程、系统活动信号和终端屏幕提示判断是否正在处理任务。从运行转为空闲时，显示 **done**
+
+Claude 使用 `caffeinate` 子进程作为运行信号。已知运行中的轮次失去该信号时，以输入框上方的动态状态和计时提示确认是否仍在运行。已空闲的会话不轮询屏幕；从未启动 `caffeinate` 的轮次不在此补充检测的覆盖范围内。屏幕读取失败时保留原状态，不会因此标记完成。
 
 屏幕提示目前只匹配英文文本，检测结果可能随 CLI 版本变化；不支持 SSH 远程智能体或桌面应用。实现细节见[进程检测](src/iterm_agents/detector.py)和[屏幕信号](src/iterm_agents/screen_signals.py)
 

@@ -7,6 +7,8 @@ and acknowledgements belong to SessionStateTracker.
 
 from __future__ import annotations
 
+import re
+
 from iterm_agents.models import AgentType
 
 # A frozen "Running N tokens" footer is a finished turn whose status line
@@ -16,6 +18,8 @@ CURSOR_FOOTER_STALE_SECONDS = 30.0
 
 def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
     """True when the agent's composer footer shows a live turn."""
+    if agent_type is AgentType.CLAUDE:
+        return claude_screen_shows_active_turn(screen_text)
     if agent_type is AgentType.CURSOR:
         return cursor_activity_signature(screen_text) is not None
     if agent_type is AgentType.DEVIN:
@@ -24,6 +28,26 @@ def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
         return codex_screen_shows_active_turn(screen_text)
     if agent_type is AgentType.KIMI:
         return kimi_screen_shows_active_turn(screen_text)
+    return False
+
+
+def claude_screen_shows_active_turn(screen_text: str) -> bool:
+    """Match the latest spinner/status above Claude's bordered composer."""
+    # shortcut: current composer layout; update fixtures if Claude changes its footer.
+    lines = screen_text.splitlines()
+    for prompt in range(len(lines) - 1, max(len(lines) - 13, 0), -1):
+        if not lines[prompt].lstrip().startswith("\u276f"):
+            continue
+        if not lines[prompt - 1].lstrip().startswith("──"):
+            continue
+        for index in range(prompt - 2, max(prompt - 14, -1), -1):
+            line = lines[index].strip()
+            if re.match(r"^[✢✳✶✻✽·*]\s+", line):
+                status = " ".join(lines[index : min(index + 3, prompt - 1)]).strip()
+                return (
+                    re.match(r"^[✢✳✶✻✽·*]\s+.+(?:…|\.\.\.)\s+\([0-9]+[hms]\b", status) is not None
+                )
+        return False
     return False
 
 
