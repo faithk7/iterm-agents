@@ -13,11 +13,12 @@ from iterm_agents.screen_signals import (
 
 
 class TestScreenShowsActiveTurn:
-    def test_cursor_running_footer(self) -> None:
+    @pytest.mark.parametrize("status", ["Running  8.98k tokens", "Summarizing"])
+    def test_cursor_running_footer(self, status: str) -> None:
         screen = "\n".join(
             [
                 "  some command output",
-                "  ⠠⠜ Running  8.98k tokens",
+                f"  ⠠⠜ {status}",
                 "  → Add a follow-up                                       ctrl+c to stop",
                 "  Grok 4.7 256K High                                      Run Everything",
             ]
@@ -48,10 +49,11 @@ class TestScreenShowsActiveTurn:
         screen = "  ⠠⠜ Running  8.98k tokens\n  ctrl+c to stop"
         assert not screen_shows_active_turn(AgentType.KIMI, screen)
 
-    def test_leftover_running_line_above_an_idle_composer_is_ignored(self) -> None:
+    @pytest.mark.parametrize("status", ["Running  2.79k tokens", "Summarizing"])
+    def test_leftover_running_line_above_an_idle_composer_is_ignored(self, status: str) -> None:
         screen = "\n".join(
             [
-                "  ⠰⠳ Running  2.79k tokens",
+                f"  ⠰⠳ {status}",
                 "  ▄▄▄▄▄▄▄▄",
                 "  → Add a follow-up",
                 "  ▀▀▀▀▀▀▀▀",
@@ -93,11 +95,12 @@ class TestScreenShowsActiveTurn:
 
 
 class TestDevinScreenShowsActiveTurn:
-    def test_running_status_line_above_the_input_box(self) -> None:
+    @pytest.mark.parametrize("status", ["Running tools", "Compacting"])
+    def test_running_status_line_above_the_input_box(self, status: str) -> None:
         screen = "\n".join(
             [
                 "  │ some tool output",
-                "  ⠀⠸ Running tools · 2m 28s (esc twice to interrupt)",
+                f"  ⠀⠸ {status} · 2m 28s (esc twice to interrupt)",
                 "  ─────────────────────────── (bypass permissions on) ─",
                 "  ❭ Guide Devin while it works",
                 "  ───────────────────────────────────────────────",
@@ -168,6 +171,30 @@ class TestDevinScreenShowsActiveTurn:
 
 
 class TestCodexScreenShowsActiveTurn:
+    @pytest.mark.parametrize("status", ["Working", "Compacting context"])
+    def test_queued_message_below_the_status_line(self, status: str) -> None:
+        screen = "\n".join(
+            [
+                f"  • {status} (3m 04s • esc to interrupt)",
+                "    └ Making room to continue.",
+                "",
+                "  • Messages to be submitted after next tool call",
+                "    (press esc to interrupt and send immediately)",
+                "    ↳ The UI shows view badges on cards under review and offline,",
+                "      but our current code shows counts only on published cards.",
+                "      Should badges appear for every status?",
+                "",
+                "    ~",
+                "",
+                "  \u203a Ask Codex to do anything",
+                "",
+                "  GPT-6.1-Sol high · ~/repo · Thread title",
+                "  ? for shortcuts     ⚠ 1 warning · f2 to view",
+            ]
+        )
+        assert screen_shows_active_turn(AgentType.CODEX, screen)
+        assert not screen_shows_active_turn(AgentType.CODEX, screen.split("\n", 1)[1])
+
     def test_working_status_line_above_the_composer(self) -> None:
         screen = "\n".join(
             [
@@ -254,6 +281,7 @@ class TestClaudeScreenShowsActiveTurn:
         "status",
         [
             "✻ Symbioting… (3m 14s · ↓ 3.4k tokens)",
+            "✻ Compacting conversation… (3m 14s · ↓ 3.4k tokens)",
             "✢ Actioning... (5s · ↑ 12 tokens)",
             "✶ Thinking… (1m 2s · ↓ 1.2k tokens · esc to interrupt)",
             "✻ Symbioting…\n  (3m 14s · ↓ 3.4k tokens)",
@@ -278,6 +306,7 @@ class TestClaudeScreenShowsActiveTurn:
         "status",
         [
             "✻ Crunched for 25s · done 12:51",
+            "✻ Compacted conversation for 25s · done 12:51",
             "✻ Thinking about the change",
             'print("✻ Symbioting… (3m 14s · ↓ 3.4k tokens)")',
         ],
@@ -301,6 +330,11 @@ class TestClaudeScreenShowsActiveTurn:
 
 
 class TestKimiScreenShowsActiveTurn:
+    @pytest.mark.parametrize("tip", ["", " · Tip: @: mention files"])
+    def test_compacting_context_above_the_composer(self, tip: str) -> None:
+        screen = f"  • Compacting context…{tip}\n  ╭────────╮\n  │ >      │\n  ╰────────╯"
+        assert screen_shows_active_turn(AgentType.KIMI, screen)
+
     def test_working_status_line_above_the_composer(self) -> None:
         screen = "\n".join(
             [
@@ -402,7 +436,14 @@ class TestKimiScreenShowsActiveTurn:
         assert not screen_shows_active_turn(AgentType.KIMI, screen)
 
     def test_terminal_labels_are_not_running(self) -> None:
-        for label in ("Completed.", "Failed.", "Aborted.", "Cancelled."):
+        for label in (
+            "Completed.",
+            "Failed.",
+            "Aborted.",
+            "Cancelled.",
+            "Compaction complete",
+            "Compaction cancelled",
+        ):
             screen = "\n".join(
                 [
                     f"  🌕 {label}",

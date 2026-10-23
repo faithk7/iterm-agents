@@ -54,18 +54,20 @@ def claude_screen_shows_active_turn(screen_text: str) -> bool:
 def codex_screen_shows_active_turn(screen_text: str) -> bool:
     """True while Codex's status line shows the interrupt hint.
 
-    A running turn draws ``Working (<elapsed> • esc to interrupt)`` on the
-    line above the composer. The hint is redrawn in place, so it only exists
-    on screen while the turn is live. Anchoring it to the composer prompt
+    A running turn draws ``Working (<elapsed> • esc to interrupt)`` or
+    ``Compacting context (<elapsed> • esc to interrupt)`` above the composer.
+    The hint is redrawn in place, so it only exists on screen while the
+    turn is live. Anchoring it to the composer prompt
     or the shortcuts footer below keeps transcript echoes of the same
     string from matching; not every composer variant draws the same
     prompt character.
     """
     lines = screen_text.splitlines()
-    for index in range(len(lines) - 1, max(len(lines) - 13, -1), -1):
+    # shortcut: bounded lookahead for wrapped queues; extend fixtures for larger Codex footers.
+    for index in range(len(lines) - 1, max(len(lines) - 17, -1), -1):
         if "esc to interrupt)" not in lines[index]:
             continue
-        for lookahead in range(index + 1, min(index + 9, len(lines))):
+        for lookahead in range(index + 1, min(index + 13, len(lines))):
             stripped = lines[lookahead].lstrip()
             if stripped.startswith("\u203a") or "? for shortcuts" in stripped:
                 return True
@@ -79,6 +81,7 @@ _KIMI_BUSY_LABELS = (
     "Queued",
     "Rate limited",
     "Thinking",
+    "Compacting context",
 )
 
 _KIMI_BUSY_NEEDLES = tuple(
@@ -90,9 +93,8 @@ def kimi_screen_shows_active_turn(screen_text: str) -> bool:
     """True while Kimi's status line shows an in-progress label.
 
     A live turn draws ``Working…`` (or Prompting/Orchestrating/Queued/
-    Rate limited/Thinking, all ending in an ellipsis) above the composer
-    box;
-    while a tool runs the label is empty and the status line shows only
+    Rate limited/Thinking/Compacting context, all ending in an ellipsis)
+    above the composer box; while a tool runs the label is empty and the status line shows only
     the spinner and its rotating `` · Tip:`` hint. Finished turns end
     with ``Completed.``, ``Failed.`` and friends. The status line is
     redrawn in place, so it only exists on screen while the turn is
