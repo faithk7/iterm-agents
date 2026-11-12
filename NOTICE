@@ -9,5 +9,5 @@ grouping, click-to-focus, and the Claude Code and Codex activity signals
 come from that project.
 
 This repository is separate. It adds recognition for the Cursor Agent CLI,
-the Devin CLI, and Kimi Code, and it registers its own toolbelt panel
+the Devin CLI, Kimi Code, and Qoder CN, and it registers its own toolbelt panel
 (`dev.iterm-agents.monitor`) so it can run beside it2ag.

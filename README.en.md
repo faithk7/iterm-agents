@@ -5,9 +5,9 @@
 ![iterm-agents: Five agents. One view. Know what's running. Jump to what's finished.](docs/promo-iterm-agents.png)
 
 An iTerm2 toolbelt panel that watches your terminal sessions and shows which
-coding agents are running — Claude Code, Codex, Cursor Agent, Devin, and Kimi
-Code — so you can see at a glance which turn is still working and which just
-finished, then click through to that pane.
+coding agents are running — Claude Code, Codex, Cursor Agent, Devin, Kimi
+Code, and Qoder CN — so you can see at a glance which turn is still working
+and which just finished, then click through to that pane.
 
 ![The full iTerm2 window with terminal panes and the Agents toolbelt on the right](docs/iterm-window.png)
 
@@ -20,6 +20,7 @@ finished, then click through to that pane.
 | Cursor Agent | `cursor-agent` (or `node`/`agent` on its `index.js`) |
 | Devin CLI    | `devin`                                              |
 | Kimi Code    | `kimi` / `kimi-code`                                 |
+| Qoder CN CLI | `qodercn` / `qoderclicn`                             |
 
 ## What you get
 
@@ -320,7 +321,7 @@ the observation-to-display flow, and cache/focus state rules.
 [@mkusaka](https://github.com/mkusaka) — the project this is derived from.
 Its process scan, toolbelt panel, session list, git and worktree grouping,
 click-to-focus, and the Claude Code and Codex activity signals are reused
-here; the Cursor Agent, Devin, and Kimi Code detection is new. See
+here; the Cursor Agent, Devin, Kimi Code, and Qoder CN detection is new. See
 [NOTICE](NOTICE).
 
 ## License

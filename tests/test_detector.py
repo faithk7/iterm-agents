@@ -562,3 +562,33 @@ class TestDetectAgents:
         assert agent.pid == 20
         assert agent.session_pid == 10
         assert agent.state is (AgentState.RUNNING if busy else AgentState.IDLE)
+
+    @pytest.mark.parametrize("busy", [False, True])
+    @pytest.mark.parametrize(
+        "command",
+        ["qodercn", "qoderclicn", "/Users/test/.local/bin/qoderclicn --resume"],
+    )
+    def test_qodercn_launch_is_associated_with_session(self, busy: bool, command: str) -> None:
+        table = _make_table(
+            [(10, 1, "zsh"), (20, 10, command), (21, 20, command), (40, 1, command)]
+        )
+        if busy:
+            table[30] = ProcessInfo(30, 20, "caffeinate -dims")
+        with patch("iterm_agents.detector._build_process_table", return_value=table):
+            [agent] = detect_agents({10})
+        assert agent.agent_type is AgentType.QODERCN
+        assert agent.pid == 20
+        assert agent.session_pid == 10
+        assert agent.state is (AgentState.RUNNING if busy else AgentState.IDLE)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo qodercn",
+            "qoderclicn-helper",
+            "/Applications/Qoder CN.app/Contents/MacOS/Electron",
+            "node /Applications/Qoder CN.app/Contents/Resources/app/bin/qodercn",
+        ],
+    )
+    def test_qodercn_mentions_and_ide_are_not_agents(self, command: str) -> None:
+        assert not _is_agent_process(command)

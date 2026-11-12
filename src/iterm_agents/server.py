@@ -1089,7 +1089,7 @@ class AgentMonitorServer:
     ) -> str:
         """Upgrade an idle session while its live-turn hint is on screen."""
         text = await self._screen_text(session)
-        if text is None and agent_type in (AgentType.CLAUDE, AgentType.CODEX):
+        if text is None and agent_type in (AgentType.CLAUDE, AgentType.CODEX, AgentType.QODERCN):
             return AgentState.UNKNOWN.value
         if text is not None and screen_shows_active_turn(agent_type, text):
             return AgentState.RUNNING.value

@@ -146,6 +146,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .agent-type.cursor { background: #2a2a4a; color: #b4b4f0; }
   .agent-type.devin { background: #3a2a4a; color: #d4a4e8; }
   .agent-type.kimi { background: #12233d; color: #5b87c9; }
+  .agent-type.qodercn { background: #14351e; color: #4ade80; }
   .label {
     font-size: 10px;
     padding: 1px 5px;

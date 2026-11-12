@@ -4,7 +4,7 @@
 
 ![iterm-agents：五种智能体，一个面板。查看运行状态，跳转到已完成的会话](docs/promo-iterm-agents.png)
 
-在 iTerm2 工具栏（Toolbelt）中统览 Claude Code、Codex、Cursor Agent、Devin 和 Kimi Code 的会话状态；点击直达对应窗格，随时接手下一步
+在 iTerm2 工具栏（Toolbelt）中统览 Claude Code、Codex、Cursor Agent、Devin、Kimi Code 和 Qoder CN 的会话状态；点击直达对应窗格，随时接手下一步
 
 ![完整的 iTerm2 窗口：左侧为终端窗格，右侧为 Agents 面板](docs/iterm-window.png)
 
@@ -17,6 +17,7 @@
 | Cursor Agent | `cursor-agent`（或运行其 `index.js` 的 `node` / `agent`） |
 | Devin CLI | `devin` |
 | Kimi Code | `kimi` / `kimi-code` |
+| Qoder CN CLI | `qodercn` / `qoderclicn` |
 
 ## 功能
 
@@ -242,7 +243,7 @@ uv run mypy src/         # 类型检查（仅 src/；测试使用模拟对象）
 
 ## 致谢
 
-本项目衍生自 [@mkusaka](https://github.com/mkusaka) 的 [it2ag](https://github.com/mkusaka/it2ag)。复用了其进程扫描、工具栏面板、会话列表、Git 和 worktree 分组、点击聚焦，以及 Claude Code 和 Codex 的活动信号；Cursor Agent、Devin 和 Kimi Code 的检测为本项目新增。详见 [NOTICE](NOTICE)
+本项目衍生自 [@mkusaka](https://github.com/mkusaka) 的 [it2ag](https://github.com/mkusaka/it2ag)。复用了其进程扫描、工具栏面板、会话列表、Git 和 worktree 分组、点击聚焦，以及 Claude Code 和 Codex 的活动信号；Cursor Agent、Devin、Kimi Code 和 Qoder CN 的检测为本项目新增。详见 [NOTICE](NOTICE)
 
 ## 许可证
 

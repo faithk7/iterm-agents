@@ -12,6 +12,34 @@ from iterm_agents.screen_signals import (
 )
 
 
+class TestQoderCNScreenShowsActiveTurn:
+    @pytest.mark.parametrize("status", ["Thinking...", "Generating...", "Running tools..."])
+    def test_cancel_hint_above_composer_is_running(self, status: str) -> None:
+        screen = (
+            f" ⠴ {status} (esc to cancel, 5m 56s)       ? for shortcuts\n"
+            "────────────────────────────────────────\n"
+            " YOLO Shift+Tab to Auto Mode\n"
+            "────────────────────────────────────────\n"
+            " *   Type your message or @path/to/file\n"
+            "────────────────────────────────────────\n"
+            " Qwen4-Max-Preview Model · 1M context\n"
+        )
+        assert screen_shows_active_turn(AgentType.QODERCN, screen)
+        assert not screen_shows_active_turn(AgentType.CODEX, screen)
+
+    @pytest.mark.parametrize(
+        "screen",
+        [
+            "",
+            " ? for shortcuts\n──────\n YOLO Shift+Tab to Auto Mode\n──────\n * Type your message",
+            "Quoted: Thinking... (esc to cancel, 5s)\nAn explanation\n──────\n * Type your message",
+            "Thinking... (esc to cancel, 5s)\n──────\n" + "old transcript\n" * 15,
+        ],
+    )
+    def test_idle_and_transcript_hints_are_ignored(self, screen: str) -> None:
+        assert not screen_shows_active_turn(AgentType.QODERCN, screen)
+
+
 class TestScreenShowsActiveTurn:
     @pytest.mark.parametrize("status", ["Running  8.98k tokens", "Summarizing"])
     def test_cursor_running_footer(self, status: str) -> None:

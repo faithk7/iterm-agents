@@ -44,7 +44,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="iterm-agents",
         description=(
-            "iTerm2 agent monitor for Claude Code, Codex, Cursor Agent, Devin, and Kimi Code"
+            "iTerm2 agent monitor for Claude Code, Codex, Cursor Agent, Devin, "
+            "Kimi Code, and Qoder CN"
         ),
     )
     parser.add_argument(

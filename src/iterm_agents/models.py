@@ -19,6 +19,7 @@ class AgentType(Enum):
     CURSOR = "cursor"
     DEVIN = "devin"
     KIMI = "kimi"
+    QODERCN = "qodercn"
 
 
 class AgentState(Enum):

@@ -713,10 +713,25 @@ class TestAgentMonitorServer:
             response = await server._handle_sessions(None)
             assert json.loads(response.text)[0]["agent_state"] == expected
 
-    async def test_failed_codex_screen_read_is_unknown(self) -> None:
+    @pytest.mark.parametrize("agent_type", [AgentType.CODEX, AgentType.QODERCN])
+    async def test_failed_screen_read_is_unknown(self, agent_type: AgentType) -> None:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
         server._screen_text = AsyncMock(return_value=None)
-        assert await server._screen_hint_state(_Session(""), AgentType.CODEX, "idle") == "unknown"
+        assert await server._screen_hint_state(_Session(""), agent_type, "idle") == "unknown"
+
+    async def test_qodercn_screen_turn_completion(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        session = _Session(" ⠴ Thinking... (esc to cancel, 5s)\n──────\n * Type your message")
+        session.name = "Qoder CN"
+        agent = AgentInfo(AgentType.QODERCN, AgentState.IDLE, 20, 10)
+        row = await server._session_row(10, session, "", agent, False, None)
+        assert row["agent_type"] == "qodercn"
+        assert row["agent_state"] == "running"
+        server._session_state.apply([row])
+        session._text = " ? for shortcuts\n──────\n * Type your message"
+        row = await server._session_row(10, session, "", agent, False, None)
+        [row] = server._session_state.apply([row])
+        assert row["agent_state"] == "awaiting_user"
 
     async def test_claude_screen_fallback_and_failed_read(self) -> None:
         server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]

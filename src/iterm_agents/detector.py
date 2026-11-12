@@ -160,6 +160,8 @@ _EXECUTABLE_AGENT_TYPES = {
     "devin": AgentType.DEVIN,
     "kimi": AgentType.KIMI,
     "kimi-code": AgentType.KIMI,
+    "qodercn": AgentType.QODERCN,
+    "qoderclicn": AgentType.QODERCN,
 }
 
 
@@ -252,7 +254,7 @@ def _detect_codex_state(children: dict[int, list[ProcessInfo]], pid: int) -> Age
 
 
 def _detect_busy_child_state(children: dict[int, list[ProcessInfo]], pid: int) -> AgentState:
-    """Cursor Agent, Devin, and Kimi Code have no published turn signal.
+    """Cursor Agent, Devin, Kimi Code, and Qoder CN use busy-child hints.
 
     A sleep-prevention or sandbox child means a turn is doing work. With no
     such child the session is listed as idle even if the model is waiting on

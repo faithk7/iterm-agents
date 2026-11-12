@@ -1,7 +1,7 @@
 [project]
 name = "iterm-agents"
 version = "0.1.0"
-description = "iTerm2 agent monitor for Claude Code, Codex, Cursor Agent, Devin, and Kimi Code"
+description = "iTerm2 agent monitor for Claude Code, Codex, Cursor Agent, Devin, Kimi Code, and Qoder CN"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

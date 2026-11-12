@@ -28,6 +28,8 @@ def screen_shows_active_turn(agent_type: AgentType, screen_text: str) -> bool:
         return codex_screen_shows_active_turn(screen_text)
     if agent_type is AgentType.KIMI:
         return kimi_screen_shows_active_turn(screen_text)
+    if agent_type is AgentType.QODERCN:
+        return qodercn_screen_shows_active_turn(screen_text)
     return False
 
 
@@ -125,6 +127,16 @@ def devin_screen_shows_active_turn(screen_text: str) -> bool:
     for index in range(len(lines) - 2, max(len(lines) - 12, -1), -1):
         line = lines[index]
         if "esc" in line and "to interrupt)" in line and lines[index + 1].lstrip().startswith("──"):
+            return True
+    return False
+
+
+def qodercn_screen_shows_active_turn(screen_text: str) -> bool:
+    """Match Qoder CN's cancel hint directly above the composer border."""
+    # shortcut: current Qoder CN footer; update fixtures if its composer layout changes.
+    lines = screen_text.splitlines()
+    for index in range(len(lines) - 2, max(len(lines) - 12, -1), -1):
+        if "(esc to cancel," in lines[index] and lines[index + 1].lstrip().startswith("──"):
             return True
     return False
 
