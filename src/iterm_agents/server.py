@@ -14,11 +14,13 @@ from typing import Any
 from uuid import uuid4
 
 import iterm2
+import iterm2.api_pb2
 import iterm2.app
 import iterm2.connection
 import iterm2.focus
 import iterm2.keyboard
 import iterm2.mainmenu
+import iterm2.rpc
 import iterm2.session
 import iterm2.tool
 from aiohttp import web
@@ -107,6 +109,7 @@ class AgentMonitorServer:
         self._groups: dict[str, SessionGroup] = {}
         self._session_group_ids: dict[str, str] = {}
         self._repo_order: dict[str, list[str]] = {}
+        self._closing_sessions: set[str] = set()
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
         self._scan_rpc_gate = asyncio.Semaphore(self._SCAN_RPC_CONCURRENCY)
@@ -757,7 +760,9 @@ class AgentMonitorServer:
             }
         )
 
-    async def _handle_sessions(self, request: web.Request | None) -> web.Response:
+    async def _handle_sessions(
+        self, request: web.Request | None, *, force: bool = False
+    ) -> web.Response:
         """Serve the latest scan; concurrent or rapid polls share one scan.
 
         Clicking a session row refetches immediately, so without this cache a
@@ -774,7 +779,7 @@ class AgentMonitorServer:
         async with self._scan_lock:
             timestamp, raw = self._scan_cache
             fresh = False
-            if timestamp == 0.0 or time.monotonic() - timestamp > self._SCAN_CACHE_TTL:
+            if force or timestamp == 0.0 or time.monotonic() - timestamp > self._SCAN_CACHE_TTL:
                 try:
                     self._scan_started_at = time.monotonic()
                     raw = await asyncio.wait_for(self._scan_sessions(), timeout=self._SCAN_TIMEOUT)
@@ -811,8 +816,8 @@ class AgentMonitorServer:
         self._detached_tasks.add(self._scan_refresh_task)
         self._scan_refresh_task.add_done_callback(self._detached_done)
 
-    async def _refresh_sessions(self) -> None:
-        await self._handle_sessions(None)
+    async def _refresh_sessions(self, *, force: bool = False) -> None:
+        await self._handle_sessions(None, force=force)
 
     def _sessions_response(
         self, request: web.Request | None, *, fresh: bool = False
@@ -1116,6 +1121,37 @@ class AgentMonitorServer:
             order[repo] = list(dict.fromkeys([*saved, *items]))
         return order
 
+    async def _close_group(self, group_id: str, confirmed: object) -> web.Response:
+        if (
+            not isinstance(confirmed, list)
+            or not confirmed
+            or not all(isinstance(session, str) for session in confirmed)
+        ):
+            raise web.HTTPBadRequest(text="Expected confirmed session IDs")
+        members = [
+            row["id"]
+            for row in self._scan_cache[1]
+            if (group := self._group_for_row(row)) is not None and group["id"] == group_id
+        ]
+        if sorted(confirmed) != sorted(members):
+            raise web.HTTPConflict(text="Group membership changed")
+        if self._closing_sessions.intersection(members):
+            raise web.HTTPConflict(text="Some sessions are already being closed")
+
+        self._closing_sessions.update(members)
+        try:
+            result = await iterm2.rpc.async_close(  # type: ignore[no-untyped-call]
+                self.connection, sessions=members, force=False
+            )
+            statuses = result.close_response.statuses
+            if len(statuses) != len(members):
+                raise web.HTTPBadGateway(text="iTerm2 did not confirm the close result")
+            closed = sum(status == iterm2.api_pb2.CloseResponse.OK for status in statuses)
+        finally:
+            self._closing_sessions.difference_update(members)
+        self._spawn_detached(self._refresh_sessions(force=True))
+        return web.json_response({"closed": closed, "total": len(members)})
+
     async def _handle_group(self, request: web.Request) -> web.Response:
         """Edit repo-scoped groups of live session cards."""
         if request.content_type != "application/json":
@@ -1141,6 +1177,11 @@ class AgentMonitorServer:
             raise web.HTTPBadRequest(text="Invalid group color")
 
         group = self._groups.get(group_id) if group_id else None
+        if action == "close":
+            if request.headers.get("Origin") != self.url.rstrip("/"):
+                raise web.HTTPForbidden(text="Close requests must come from the Agents panel")
+            return await self._close_group(group_id, data.get("sessions"))
+
         if action in ("create", "move"):
             row = next((row for row in self._scan_cache[1] if row["id"] == session_id), None)
             if row is None:

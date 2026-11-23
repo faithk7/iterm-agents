@@ -257,6 +257,12 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     overflow-wrap: anywhere;
   }
   .ctx-item:hover, .ctx-item:focus-visible { background: #094771; }
+  .ctx-message {
+    max-width: 215px;
+    padding: 6px 12px;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
   .session-name { color: #d4d4d4; font-size: 11px; margin-top: 2px; }
   .branch-row {
     display: flex;
@@ -325,21 +331,25 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     // Bound the entire request, including JSON decoding. The deadline also
     // releases callers if a stalled transport fails to honour cancellation.
-    async function panelRequest(url, json = false, options = {}) {
+    async function panelRequest(url, json = false, options = {}, deadline = 8000) {
       const controller = new AbortController();
       let timer;
       try {
         return await Promise.race([
           (async () => {
             const response = await fetch(url, {...options, signal: controller.signal});
-            if (response.ok === false) throw new Error('HTTP ' + response.status);
+            if (response.ok === false) {
+              const error = new Error('HTTP ' + response.status);
+              error.status = response.status;
+              throw error;
+            }
             return json ? {response, data: await response.json()} : response;
           })(),
           new Promise((resolve, reject) => {
             timer = setTimeout(() => {
               controller.abort();
               reject(new Error('Request timed out'));
-            }, 8000);
+            }, deadline);
           }),
         ]);
       } finally {
@@ -541,6 +551,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // Collapsed repo keys; persists across the per-second re-render.
     const collapsedRepos = new Set();
     const collapsedGroups = new Set();
+    let closingGroup = false;
     let dragging = null;
     let dropTarget = null;
     let dropStyle = '';
@@ -758,14 +769,32 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         action: 'reorder', group: id, target: below, before: false,
       })]);
       items.push(['Ungroup sessions', () => editGroup({action: 'ungroup', group: id})]);
+      if (!closingGroup) {
+        items.push(['Close group…', () => {
+          const sessions = itemsInOrder[index][1].map(s => s.id);
+          const count = `${sessions.length} ${sessions.length === 1 ? 'session' : 'sessions'}`;
+          openMenu([
+            ['Cancel', () => {}],
+            [`Close ${count}`, () => editGroup({action: 'close', group: id, sessions})],
+          ], x, y, `Close “${group.name}” and its ${count}? Running commands may stop.`);
+        }]);
+      }
       openMenu(items, x, y);
     }
 
-    function openMenu(items, x, y) {
+    function openMenu(items, x, y, message = '') {
       closeCtxMenu();
       closeLabelEditor();
       const menu = document.createElement('div');
       menu.className = 'ctx-menu';
+      if (message) {
+        const prompt = document.createElement('div');
+        prompt.className = 'ctx-message';
+        prompt.textContent = message;
+        menu.appendChild(prompt);
+        menu.setAttribute('role', 'group');
+        menu.setAttribute('aria-label', message);
+      }
       for (const [label, action] of items) {
         const item = document.createElement('button');
         item.type = 'button';
@@ -784,21 +813,40 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       // Focus the menu so the webview actually receives the Esc key — a
       // right-click alone does not move keyboard focus off the terminal.
       menu.tabIndex = -1;
-      menu.focus({ preventScroll: true });
       ctxMenu = menu;
+      (message ? menu.querySelector('.ctx-item') : menu).focus({ preventScroll: true });
     }
 
     async function editGroup(change) {
       const status = document.getElementById('group-status');
-      status.textContent = '';
+      const closing = change.action === 'close';
+      if (closing) {
+        if (closingGroup) return;
+        closingGroup = true;
+        status.textContent = 'Waiting for iTerm2 to close sessions…';
+      } else if (!closingGroup) {
+        status.textContent = '';
+      }
       try {
-        await panelRequest('/api/groups', false, {
+        const result = await panelRequest('/api/groups', closing, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(change),
-        });
+        }, closing ? 120000 : 8000);
+        if (closing) {
+          const {closed, total} = result.data;
+          status.textContent = closed === total ? '' : `Closed ${closed} of ${total} sessions.`;
+        }
       } catch (error) {
-        status.textContent = 'Could not update group. Try again.';
+        if (closing) {
+          status.textContent = error.status === 409
+            ? 'Group changed or is closing. Check its sessions and try again.'
+            : 'Could not confirm the close result. Check which sessions are still open.';
+        } else {
+          status.textContent = 'Could not update group. Try again.';
+        }
+      } finally {
+        if (closing) closingGroup = false;
       }
       await loadSessions();
     }

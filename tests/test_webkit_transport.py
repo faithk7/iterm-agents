@@ -10,8 +10,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import iterm2.api_pb2
+import iterm2.rpc
 import pytest
 from aiohttp import web
 
@@ -62,7 +65,9 @@ int main(int argc, char **argv) {
     return binary
 
 
-async def test_repo_groups_in_narrow_webkit_panel(webkit_probe: Path) -> None:
+async def test_repo_groups_in_narrow_webkit_panel(
+    webkit_probe: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
     rows = [
         {
@@ -79,9 +84,20 @@ async def test_repo_groups_in_narrow_webkit_panel(webkit_probe: Path) -> None:
             (1, "repo", "main"), (2, "repo", "worktree"), (3, "repo", "fix"), (4, "other", "main")
         )
     ]
-    server._scan_cache = (time.monotonic(), rows)
-    server._scan_sessions = AsyncMock(return_value=rows)
+    server._scan_cache = (time.monotonic(), rows.copy())
+    server._scan_sessions = AsyncMock(side_effect=rows.copy)
     server._activate_session = AsyncMock()
+
+    def close(_connection, *, sessions, force):
+        assert sessions == ["s-2", "s-3"]
+        assert force is False
+        rows[:] = [row for row in rows if row["id"] != "s-2"]
+        response = iterm2.api_pb2.CloseResponse()
+        response.statuses.extend([response.OK, response.USER_DECLINED])
+        return SimpleNamespace(close_response=response)
+
+    native_close = AsyncMock(side_effect=close)
+    monkeypatch.setattr(iterm2.rpc, "async_close", native_close)
     html = AGENT_MONITOR_HTML.replace(
         "<script>", """<script>window.name = 'iterm-agents:window:w1';
 window.addEventListener('error', e => window.webkit.messageHandlers.result
@@ -239,6 +255,28 @@ async function waitFor(condition, message) {
   groupMenu(groupOf(3));
   choose('Ungroup sessions');
   await waitFor(() => card(3) && !groupOf(3), 'ungroup all members');
+
+  groupMenu(groupOf(2));
+  choose('Close group…');
+  check(document.activeElement.textContent === 'Cancel', 'close confirmation focuses Cancel');
+  choose('Cancel');
+  check(card(2), 'cancel keeps the session');
+
+  groupMenu(groupOf(2));
+  choose('Close group…');
+  await fetch('/api/groups', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'move', session: 's-3', group: first})});
+  choose('Close 1 session');
+  const groupStatus = document.getElementById('group-status');
+  await waitFor(() => groupStatus.textContent.includes('Group changed'), 'reject stale confirmation');
+  await waitFor(() => groupOf(3)?.dataset.group === first, 'show updated membership');
+  groupMenu(groupOf(2));
+  choose('Close group…');
+  choose('Close 2 sessions');
+  await waitFor(() => groupStatus.textContent === 'Closed 1 of 2 sessions.', 'show partial close');
+  await waitFor(() => !card(2), 'closed session disappears');
+  check(groupOf(3) && card(4), 'declined and unrelated sessions stay open');
+
   card(1).click();
   await new Promise(resolve => setTimeout(resolve, 50));
   window.webkit.messageHandlers.result.postMessage('DONE groups worked');
@@ -260,6 +298,7 @@ async function waitFor(condition, message) {
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     port = runner.addresses[0][1]
+    server.port = port
     process = await asyncio.create_subprocess_exec(
         str(webkit_probe), f"http://127.0.0.1:{port}/", "240",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -270,6 +309,7 @@ async function waitFor(condition, message) {
             output.decode() + errors.decode()
         )
         server._activate_session.assert_awaited_once_with("s-1")
+        native_close.assert_awaited_once_with(None, sessions=["s-2", "s-3"], force=False)
     finally:
         if process.returncode is None:
             process.kill()
@@ -358,7 +398,7 @@ async def test_webkit_deadline_preserves_cards_and_recovers(webkit_probe: Path, 
     rows = [{"id": "s-1", "name": "agent", "window_id": "w1", "agent_state": "idle"}]
     server._scan_cache = (time.monotonic(), rows)
     html = AGENT_MONITOR_HTML.replace(
-        "}, 8000);", "}, window.testRequestDeadline || 8000);"
+        "}, deadline);", "}, window.testRequestDeadline || deadline);"
     ).replace(
         "</body>", r'''
 <script>

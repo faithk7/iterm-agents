@@ -242,6 +242,8 @@ uses uv.
 - A new group starts at its session card's position. Drag the group grip to
   move it past cards or groups within the repo, or use **Move up** and **Move down**
   from its **⋯** menu.
+- **Close group…** closes the group's terminal sessions after you confirm.
+  Choose **Ungroup sessions** to dissolve the group and keep the sessions open.
 - Groups are shared by open panels while the monitor runs. A group disappears
   when its last member leaves.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.
