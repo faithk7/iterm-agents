@@ -125,6 +125,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     text-align: left;
     font-size: 11px;
     font-weight: 600;
+    cursor: inherit;
   }
   .group-name {
     min-width: 0;
@@ -145,7 +146,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     line-height: 1.35;
   }
   .menu-trigger:hover, .drag-handle:hover { color: #fff; }
-  .drag-handle { cursor: grab; -webkit-user-drag: element; }
+  .custom-group-header, .drag-handle { cursor: grab; -webkit-user-drag: element; }
   .card-actions { display: flex; align-items: center; gap: 3px; }
   .drop-target { outline: 1px solid #569cd6; outline-offset: 1px; }
   .drop-before { box-shadow: 0 -2px #569cd6; }
@@ -157,7 +158,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     border-radius: 4px;
     background: #2d2d2d;
     border-left: 3px solid #808080;
-    cursor: pointer;
+    cursor: grab;
+    -webkit-user-drag: element;
     transition: background 0.15s;
     outline: none;
   }
@@ -511,10 +513,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // suppressing briefly or a refresh in that gap still swallows the click.
     let pointerDown = false;
     let pointerSeq = 0;
-    let pressedX = '';
-    let pressedY = '';
-    let pressedAt = 0;
-    let activatedOnPress = false;
+    let cardPress = null;
     document.addEventListener('pointerdown', (e) => {
       bindPanelWindow();
       pointerDown = true;
@@ -523,25 +522,30 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       // Bound the render guard even when the release event never arrives.
       setTimeout(() => { if (pointerSeq === seq) pointerDown = false; }, 1000);
       const card = e.target.closest && e.target.closest('.agent');
-      pressedX = Number.isFinite(e.clientX) ? String(e.clientX) : '';
-      pressedY = Number.isFinite(e.clientY) ? String(e.clientY) : '';
-      pressedAt = Date.now();
-      activatedOnPress = !!card && !ctxMenu && !labelEditorOpen && e.button === 0 &&
+      cardPress = card && !ctxMenu && !labelEditorOpen && e.button === 0 &&
         !e.target.closest('.drag-handle, .menu-trigger, .label-editor') &&
-        (!e.pointerType || e.pointerType === 'mouse');
-      if (activatedOnPress) {
-        focusSession(card.dataset.session);
-      }
+        (!e.pointerType || e.pointerType === 'mouse')
+        ? {session: card.dataset.session, x: e.clientX, y: e.clientY, activated: false}
+        : null;
     }, true);
-    document.addEventListener('pointerup', () => {
+    function matchesCardPress(e, card) {
+      return cardPress && card?.dataset.session === cardPress.session &&
+        Math.abs(e.clientX - cardPress.x) < 5 && Math.abs(e.clientY - cardPress.y) < 5;
+    }
+    document.addEventListener('pointerup', (e) => {
       const seq = pointerSeq;
       setTimeout(() => { if (pointerSeq === seq) pointerDown = false; }, 300);
+      // Activate on release before an iTerm window switch can swallow the click.
+      const card = e.target.closest?.('.agent');
+      if (e.button === 0 && matchesCardPress(e, card) &&
+          !e.target.closest('.drag-handle, .menu-trigger, .label-editor')) {
+        cardPress.activated = true;
+        focusSession(cardPress.session);
+      }
     }, true);
     document.addEventListener('pointercancel', () => {
       pointerDown = false;
-      pressedX = '';
-      pressedY = '';
-      activatedOnPress = false;
+      cardPress = null;
     }, true);
     window.addEventListener('blur', () => {
       pointerDown = false;
@@ -591,16 +595,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       if (card) {
         const clickedSessionId = card.dataset.session;
         const keyboardClick = e.detail === 0;
-        const samePress = !keyboardClick && activatedOnPress &&
-          Date.now() - pressedAt < 1000 &&
-          Math.abs(e.clientX - Number(pressedX)) < 5 &&
-          Math.abs(e.clientY - Number(pressedY)) < 5;
-        activatedOnPress = false;
-        if (samePress) {
-          pressedX = '';
-          pressedY = '';
-          return;
-        }
+        const alreadyActivated = !keyboardClick && cardPress?.activated &&
+          matchesCardPress(e, card);
+        cardPress = null;
+        if (alreadyActivated) return;
         const hit = !keyboardClick && document.elementFromPoint && Number.isFinite(e.clientX)
           ? document.elementFromPoint(e.clientX, e.clientY) : null;
         const hitCard = hit && hit.closest ? hit.closest('.agent') : null;
@@ -608,8 +606,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         // pointer. This avoids both stale WebKit click targets and stale press
         // state carried across an iTerm window switch.
         const sessionId = hitCard ? hitCard.dataset.session : clickedSessionId;
-        pressedX = '';
-        pressedY = '';
         focusSession(sessionId);
       }
     });
@@ -633,12 +629,17 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     });
 
     sessionsPanel.addEventListener('dragstart', (e) => {
-      const handle = e.target.closest('.drag-handle');
-      if (!handle) return;
+      const source = e.target.closest('.custom-group-header, .agent');
+      if (!source) return;
+      if (ctxMenu || labelEditorOpen) {
+        e.preventDefault();
+        return;
+      }
+      cardPress = null;
       dragging = {
-        repo: handle.closest('.repo-group').dataset.key,
-        group: handle.closest('.custom-group')?.dataset.group || '',
-        session: handle.closest('.agent')?.dataset.session || '',
+        repo: source.closest('.repo-group').dataset.key,
+        group: source.closest('.custom-group')?.dataset.group || '',
+        session: source.closest('.agent')?.dataset.session || '',
       };
       pointerDown = false;
       e.dataTransfer.effectAllowed = 'move';
@@ -646,21 +647,37 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       e.dataTransfer.setData('text/plain', dragging.session ? 'Move session' : 'Move group');
     });
 
-    function dragDestination(e) {
-      if (!dragging) return null;
-      const area = dragging.session
-        ? e.target.closest('.custom-group, .repo-header')
-        : e.target.closest('.custom-group') || e.target.closest('.agent');
-      if (!area || area.closest('.repo-group').dataset.key !== dragging.repo)
-        return null;
-      const group = area.dataset.group || '';
-      if (group === dragging.group) return null;
-      if (dragging.session) return {area, group, style: 'drop-target'};
-      const target = group ? `group:${group}` : `session:${area.dataset.session}`;
-      const anchor = group ? area.querySelector('.custom-group-header') : area;
-      const rect = anchor.getBoundingClientRect();
-      const before = e.clientY < rect.top + rect.height / 2;
+    function insertionTarget(area, target, rect, clientY) {
+      const before = clientY < rect.top + rect.height / 2;
       return {area, target, before, style: before ? 'drop-before' : 'drop-after'};
+    }
+
+    function dragDestination(e) {
+      if (!dragging || e.target.closest('.repo-group')?.dataset.key !== dragging.repo) return null;
+      const card = e.target.closest('.agent');
+      const groupArea = e.target.closest('.custom-group');
+      const group = groupArea?.dataset.group || '';
+      if (dragging.session) {
+        if (group === dragging.group) {
+          if (!card || card.dataset.session === dragging.session) return null;
+          return insertionTarget(card, `session:${card.dataset.session}`,
+            card.getBoundingClientRect(), e.clientY);
+        }
+        const header = e.target.closest('.custom-group-header');
+        if (!dragging.group && header) {
+          const rect = header.getBoundingClientRect();
+          // The center accepts a new member, while the edges place a loose card beside the group.
+          if (Math.abs(e.clientY - rect.top - rect.height / 2) > rect.height / 4)
+            return insertionTarget(groupArea, `group:${group}`, rect, e.clientY);
+        }
+        const area = groupArea || e.target.closest('.repo-header');
+        return area ? {area, group, style: 'drop-target'} : null;
+      }
+      if (group === dragging.group) return null;
+      if (groupArea) return insertionTarget(groupArea, `group:${group}`,
+        groupArea.querySelector('.custom-group-header').getBoundingClientRect(), e.clientY);
+      return card ? insertionTarget(card, `session:${card.dataset.session}`,
+        card.getBoundingClientRect(), e.clientY) : null;
     }
 
     function highlightDropTarget(target, style = '') {
@@ -688,9 +705,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const {session, group} = dragging;
       dragging = null;
       highlightDropTarget(null);
-      editGroup(session ? {action: 'move', session, group: destination.group} : {
-        action: 'reorder', group, target: destination.target, before: destination.before,
-      });
+      editGroup(destination.target ? {
+        action: 'reorder', ...(session ? {session} : {group}),
+        target: destination.target, before: destination.before,
+      } : {action: 'move', session, group: destination.group});
     });
     document.addEventListener('dragend', () => {
       dragging = null;
@@ -711,6 +729,14 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       }
       if (session?.agent_state === 'awaiting_user')
         items.push(['Mark as read', () => markSessionRead(sessionId)]);
+      if (session) {
+        const siblings = itemsInRepo(session.root_repo || '');
+        const keys = session.group
+          ? (siblings.find(([key]) => key === `group:${session.group.id}`)?.[1] || [])
+            .map(row => `session:${row.id}`)
+          : siblings.map(([key]) => key);
+        addReorderActions(items, keys, `session:${sessionId}`, {session: sessionId});
+      }
       openMenu(items, x, y);
     }
 
@@ -721,12 +747,28 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         if (!items.has(key)) items.set(key, []);
         items.get(key).push(s);
       }
+      for (const rows of items.values()) {
+        rows.sort((a, b) => (a.group_position ?? 0) - (b.group_position ?? 0));
+      }
       return [...items].sort(([, a], [, b]) =>
         (a[0].sidebar_position ?? 0) - (b[0].sidebar_position ?? 0));
     }
 
     function itemsInRepo(repo) {
       return sidebarItems(allSessions.filter(s => (s.root_repo || '') === repo));
+    }
+
+    function addReorderActions(items, keys, key, source) {
+      const index = keys.indexOf(key);
+      if (index < 0) return;
+      const above = keys[index - 1];
+      const below = keys[index + 1];
+      if (above) items.push(['Move up', () => editGroup({
+        action: 'reorder', ...source, target: above, before: true,
+      })]);
+      if (below) items.push(['Move down', () => editGroup({
+        action: 'reorder', ...source, target: below, before: false,
+      })]);
     }
 
     function openGroupPicker(session, x, y) {
@@ -760,14 +802,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         ['Change color…', () => openMenu(groupColors.map(([name, color]) =>
           [name, () => editGroup({action: 'recolor', group: id, color})]), x, y)],
       ];
-      const above = itemsInOrder[index - 1]?.[0];
-      const below = itemsInOrder[index + 1]?.[0];
-      if (above) items.push(['Move up', () => editGroup({
-        action: 'reorder', group: id, target: above, before: true,
-      })]);
-      if (below) items.push(['Move down', () => editGroup({
-        action: 'reorder', group: id, target: below, before: false,
-      })]);
+      addReorderActions(items, itemsInOrder.map(([key]) => key), `group:${id}`, {group: id});
       items.push(['Ungroup sessions', () => editGroup({action: 'ungroup', group: id})]);
       if (!closingGroup) {
         items.push(['Close group…', () => {
@@ -843,7 +878,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
             ? 'Group changed or is closing. Check its sessions and try again.'
             : 'Could not confirm the close result. Check which sessions are still open.';
         } else {
-          status.textContent = 'Could not update group. Try again.';
+          status.textContent = change.action === 'reorder'
+            ? 'Could not reorder items. Try again.' : 'Could not update group. Try again.';
         }
       } finally {
         if (closing) closingGroup = false;
@@ -1194,7 +1230,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const name = esc(group.name).replace(/"/g, '&quot;');
       return `<div class="custom-group" data-group="${group.id}"
                    style="--group-color:${group.color}">
-        <div class="custom-group-header">
+        <div class="custom-group-header" draggable="true">
           <button type="button" class="group-toggle" aria-expanded="${!collapsed}" title="${name}">
             <span aria-hidden="true">${chevron}</span>
             <span class="group-name">${name}</span>
@@ -1234,7 +1270,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         ? '<div class="action-hint">Click to clear</div>'
         : '';
       return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}"
-                   data-session="${s.id}">
+                   data-session="${s.id}" draggable="true">
         <div class="agent-top">
           <span class="status">${meta.icon} ${meta.label}</span>
           <span class="card-actions">

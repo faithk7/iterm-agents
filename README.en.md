@@ -235,17 +235,18 @@ uses uv.
   the session clears its done mark.
 - Right-click a session to add a label or mark it read. Labels disappear when
   the session or monitor exits.
-- Choose **Add to group…** from a session's menu to create or join a group in
-  its repo. Drag the grip to another group in that repo, or to the repo header
-  to ungroup the session. Click a group name to collapse it and use its **⋯**
-  menu to rename, recolor, or ungroup it.
-- A new group starts at its session card's position. Drag the group grip to
-  move it past cards or groups within the repo, or use **Move up** and **Move down**
-  from its **⋯** menu.
+- Drag a session card or group header to reorder it within its repo or group.
+  You can also use **Move up** and **Move down** in its **⋯** menu.
+- Choose **Add to group…** from a session's menu or drop its card onto a group's
+  center to join it. Drop a loose card near the top or bottom of a group header
+  to place it beside the group. Drop a grouped card onto the repo header to
+  ungroup it.
+- A new group starts at its session card's position. Click its name to collapse
+  it, or use its **⋯** menu to rename, recolor, or ungroup it.
 - **Close group…** closes the group's terminal sessions after you confirm.
   Choose **Ungroup sessions** to dissolve the group and keep the sessions open.
-- Groups are shared by open panels while the monitor runs. A group disappears
-  when its last member leaves.
+- Groups and custom order are shared by open panels while the monitor runs.
+  A group disappears when its last member leaves.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.
 
 With the panel focused, use `↑` / `↓` to select a session, `Enter` to jump to

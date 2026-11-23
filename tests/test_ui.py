@@ -503,16 +503,19 @@ assert.ok(element('count').textContent.includes('0 done'));
   };
   hitTestCard = currentClickCard;
   const beforePress = focusRequests.length;
-  documentListeners.document.pointerdown[0]({
+  const press = {
     target: { closest: selector => selector === '.agent' ? pressedCard : null },
     button: 0,
     pointerType: 'mouse',
     clientX: 42,
     clientY: 84,
-  });
+  };
+  documentListeners.document.pointerdown[0](press);
+  assert.equal(focusRequests.length, beforePress, 'a potential drag must not switch panes');
+  documentListeners.document.pointerup[0](press);
   assert.equal(
     focusRequests.length, beforePress + 1,
-    'a press must activate even when WebKit never dispatches pointerup or click',
+    'a stationary release activates even when WebKit never dispatches click',
   );
   assert.equal(new URL('http://panel' + focusRequests.at(-1)).searchParams.get('session'), 'two');
   elementListeners.sessions.click[0]({
@@ -523,7 +526,6 @@ assert.ok(element('count').textContent.includes('0 done'));
       closest: selector => selector === '.agent' ? currentClickCard : null,
     },
   });
-  documentListeners.document.pointerup[0]();
   while (timeouts.length) timeouts.shift()();
   await Promise.resolve();
   const captured = new URL('http://panel' + focusRequests.at(-1));
@@ -534,10 +536,12 @@ assert.ok(element('count').textContent.includes('0 done'));
   );
 
   const beforeCompleteClick = focusRequests.length;
-  documentListeners.document.pointerdown[0]({
+  const clickPress = {
     target: { closest: selector => selector === '.agent' ? currentClickCard : null },
     button: 0, pointerType: 'mouse', clientX: 42, clientY: 300,
-  });
+  };
+  documentListeners.document.pointerdown[0](clickPress);
+  documentListeners.document.pointerup[0](clickPress);
   elementListeners.sessions.click[0]({
     detail: 1, clientX: 42, clientY: 300,
     target: { closest: selector => selector === '.agent' ? currentClickCard : null },
@@ -558,7 +562,7 @@ assert.ok(element('count').textContent.includes('0 done'));
   });
   assert.equal(new URL('http://panel' + focusRequests.at(-1)).searchParams.get('session'), 'two',
     'keyboard activation uses its selected card rather than screen coordinates');
-  documentListeners.document.pointerup[0]();
+  documentListeners.document.pointerup[0]({...clickPress, button: 2});
   while (timeouts.length) timeouts.shift()();
   await Promise.resolve();
 

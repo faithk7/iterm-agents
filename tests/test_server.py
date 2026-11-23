@@ -594,6 +594,27 @@ class TestAgentMonitorServer:
         assert all(json.loads(response.text)[0]["id"] == "first" for response in responses)
         assert scan.await_count == 1
 
+    async def test_loose_session_order_survives_fresh_scans(self) -> None:
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._scan_sessions = AsyncMock(return_value=[
+            {"id": "first", "root_repo": "~/project"},
+            {"id": "second", "root_repo": "~/project"},
+        ])
+        await server._handle_sessions(None)
+        response = await server._handle_group(SimpleNamespace(
+            content_type="application/json",
+            json=AsyncMock(return_value={
+                "action": "reorder", "session": "second", "target": "session:first", "before": True,
+            }),
+        ))
+        assert response.status == 204
+        for _ in range(2):
+            snapshot = json.loads((await server._handle_sessions(None, force=True)).text)
+            assert {row["id"]: row["sidebar_position"] for row in snapshot} == {
+                "first": 1, "second": 0,
+            }
+        await asyncio.gather(*server._detached_tasks)
+
     async def test_initial_failed_scan_reports_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

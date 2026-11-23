@@ -134,27 +134,49 @@ async function waitFor(condition, message) {
 (async () => {
   await waitFor(() => card(4), 'initial cards');
   let dataTransfer;
-  function startDrag(handle) {
-    handle.dispatchEvent(new PointerEvent('pointerdown',
+  function startDrag(target) {
+    target.dispatchEvent(new PointerEvent('pointerdown',
       {bubbles: true, button: 0, pointerType: 'mouse'}));
+    const source = target.closest('[draggable="true"]');
+    check(source, 'drag starts from a draggable element');
     dataTransfer = new DataTransfer();
-    handle.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer}));
+    source.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer}));
   }
   function drag(target, type, clientY = 0) {
     return !target.dispatchEvent(new DragEvent(type,
       {bubbles: true, cancelable: true, dataTransfer, clientY}));
   }
+  startDrag(card(3).querySelector('.session-name'));
+  check(!drag(card(4), 'dragover'), 'cannot reorder across repos');
+  const firstTop = card(1).getBoundingClientRect().top + 1;
+  check(drag(card(1), 'dragover', firstTop) && card(1).classList.contains('drop-before'),
+    'show an insertion marker for a loose session');
+  check(drag(card(1), 'drop', firstTop), 'drop from the session title');
+  await waitFor(() => card(3).nextElementSibling === card(1), 'reorder loose session cards');
+  startDrag(card(3));
+  check(drag(card(2), 'drop', card(2).getBoundingClientRect().bottom - 1),
+    'restore loose order by dragging the bar');
+  await waitFor(() => card(2).nextElementSibling === card(3), 'restore loose order');
+
   createGroup(2, 'Placement');
   await waitFor(() => groupOf(2), 'create group in middle');
   check(card(1).nextElementSibling === groupOf(2) && groupOf(2).nextElementSibling === card(3),
     'a new group takes its card’s position');
+  startDrag(card(3));
+  const placementHeader = groupOf(2).querySelector('.custom-group-header');
+  check(drag(placementHeader, 'drop', placementHeader.getBoundingClientRect().top + 1),
+    'drop a loose session before a group');
+  await waitFor(() => card(3).nextElementSibling === groupOf(2), 'reorder beside a group');
+  card(3).querySelector('.menu-trigger').click();
+  choose('Move down');
+  await waitFor(() => groupOf(2).nextElementSibling === card(3), 'restore position below the group');
   groupMenu(groupOf(2));
   choose('Move down');
   await waitFor(() => card(3).nextElementSibling === groupOf(2), 'move down past a loose card');
   groupMenu(groupOf(2));
   choose('Move up');
   await waitFor(() => groupOf(2).nextElementSibling === card(3), 'move up past a loose card');
-  startDrag(groupOf(2).querySelector('.drag-handle'));
+  startDrag(groupOf(2).querySelector('.custom-group-header'));
   const looseTop = card(1).getBoundingClientRect().top + 1;
   check(drag(card(1), 'dragover', looseTop) && drag(card(1), 'drop', looseTop),
     'drop group before a loose card');
@@ -177,6 +199,13 @@ async function waitFor(condition, message) {
   choose('Add to group…');
   choose('Release <review>');
   await waitFor(() => groupOf(2)?.dataset.group === first, 'join via worktree');
+  startDrag(card(2).querySelector('.session-name'));
+  check(drag(card(1), 'drop', card(1).getBoundingClientRect().top + 1),
+    'drop session before a sibling in its group');
+  await waitFor(() => card(2).nextElementSibling === card(1), 'reorder sessions within a group');
+  card(2).querySelector('.menu-trigger').click();
+  choose('Move down');
+  await waitFor(() => card(1).nextElementSibling === card(2), 'reorder sessions using the menu');
 
   groupOf(1).querySelector('.group-toggle').click();
   check(!card(1) && document.querySelector('.group-summary').textContent === '2 running',
@@ -208,7 +237,7 @@ async function waitFor(condition, message) {
   fixes().querySelector('.group-toggle').click();
   check(!card(3), 'collapse group before moving');
 
-  startDrag(fixes().querySelector('.drag-handle'));
+  startDrag(fixes().querySelector('.group-name'));
   const review = groupOf(1);
   const header = review.querySelector('.custom-group-header');
   const rect = header.getBoundingClientRect();
