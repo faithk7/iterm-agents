@@ -239,6 +239,9 @@ uses uv.
   its repo. Drag the grip to another group in that repo, or to the repo header
   to ungroup the session. Click a group name to collapse it and use its **⋯**
   menu to rename, recolor, or ungroup it.
+- A new group starts at its session card's position. Drag the group grip to
+  move it past cards or groups within the repo, or use **Move up** and **Move down**
+  from its **⋯** menu.
 - Groups are shared by open panels while the monitor runs. A group disappears
   when its last member leaves.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.

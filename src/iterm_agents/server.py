@@ -106,6 +106,7 @@ class AgentMonitorServer:
         self._session_state = SessionStateTracker()
         self._groups: dict[str, SessionGroup] = {}
         self._session_group_ids: dict[str, str] = {}
+        self._repo_order: dict[str, list[str]] = {}
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
         self._scan_rpc_gate = asyncio.Semaphore(self._SCAN_RPC_CONCURRENCY)
@@ -823,16 +824,25 @@ class AgentMonitorServer:
         )
         window_id = request.query.get("window", "") if request is not None else ""
         focused_id = self._focused_by_window.get(window_id)
+        repo_items = self._sidebar_order()
+        positions = {key: i for items in repo_items.values() for i, key in enumerate(items)}
         live_memberships = {}
         for row in sessions:
             row["focused"] = bool(window_id and row["id"] == focused_id)
-            group = self._groups.get(self._session_group_ids.get(row["id"], ""))
-            if group is not None and group["root_repo"] == row.get("root_repo", ""):
+            group = self._group_for_row(row)
+            if group is not None:
                 row["group"] = group
                 live_memberships[row["id"]] = group["id"]
+            if row.get("root_repo", "") in self._repo_order:
+                row["sidebar_position"] = positions[self._sidebar_key(row, group)]
         if fresh:
             self._session_group_ids = live_memberships
             self._prune_groups()
+            self._repo_order = {
+                repo: items
+                for repo, items in repo_items.items()
+                if repo in self._repo_order and any(key.startswith("group:") for key in items)
+            }
         # Cached rows can predate a new window. Their absence is not evidence
         # that its confirmed binding is invalid; use the native window snapshot.
         owner = "unknown"
@@ -1085,6 +1095,27 @@ class AgentMonitorServer:
         used = set(self._session_group_ids.values())
         self._groups = {key: group for key, group in self._groups.items() if key in used}
 
+    def _group_for_row(self, row: SessionRow) -> SessionGroup | None:
+        group = self._groups.get(self._session_group_ids.get(row["id"], ""))
+        if group is not None and group["root_repo"] == row.get("root_repo", ""):
+            return group
+        return None
+
+    @staticmethod
+    def _sidebar_key(row: SessionRow, group: SessionGroup | None) -> str:
+        return f"group:{group['id']}" if group else f"session:{row['id']}"
+
+    def _sidebar_order(self) -> dict[str, list[str]]:
+        items_by_repo: dict[str, dict[str, None]] = {}
+        for row in self._scan_cache[1]:
+            key = self._sidebar_key(row, self._group_for_row(row))
+            items_by_repo.setdefault(row.get("root_repo", ""), {})[key] = None
+        order = {}
+        for repo, items in items_by_repo.items():
+            saved = [key for key in self._repo_order.get(repo, []) if key in items]
+            order[repo] = list(dict.fromkeys([*saved, *items]))
+        return order
+
     async def _handle_group(self, request: web.Request) -> web.Response:
         """Edit repo-scoped groups of live session cards."""
         if request.content_type != "application/json":
@@ -1117,6 +1148,10 @@ class AgentMonitorServer:
             repo = row.get("root_repo", "")
             if action == "create":
                 group_id = uuid4().hex
+                items = self._sidebar_order()[repo]
+                anchor = self._sidebar_key(row, self._group_for_row(row))
+                items.insert(items.index(anchor) + 1, f"group:{group_id}")
+                self._repo_order[repo] = items
                 self._groups[group_id] = {
                     "id": group_id,
                     "root_repo": repo,
@@ -1129,6 +1164,21 @@ class AgentMonitorServer:
                 self._session_group_ids[session_id] = group_id
             else:
                 self._session_group_ids.pop(session_id, None)
+        elif action == "reorder":
+            target, before = data.get("target"), data.get("before")
+            if not isinstance(target, str) or not isinstance(before, bool):
+                raise web.HTTPBadRequest(text="Expected a target item and a before flag")
+            if group is None:
+                raise web.HTTPNotFound(text="Group is no longer available")
+            repo = group["root_repo"]
+            items = self._sidebar_order().get(repo, [])
+            source = f"group:{group_id}"
+            if source not in items or target not in items:
+                raise web.HTTPConflict(text="Items must be available in the same repo")
+            if source != target:
+                items.remove(source)
+                items.insert(items.index(target) + (0 if before else 1), source)
+                self._repo_order[repo] = items
         elif action in ("rename", "recolor", "ungroup"):
             if group is None:
                 raise web.HTTPNotFound(text="Group is no longer available")

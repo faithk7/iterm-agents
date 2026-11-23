@@ -91,3 +91,4 @@ class SessionRow(_SessionMetadata, total=False):
     label: str
     awaiting_user: bool
     group: SessionGroup
+    sidebar_position: int

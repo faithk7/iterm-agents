@@ -148,6 +148,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .drag-handle { cursor: grab; -webkit-user-drag: element; }
   .card-actions { display: flex; align-items: center; gap: 3px; }
   .drop-target { outline: 1px solid #569cd6; outline-offset: 1px; }
+  .drop-before { box-shadow: 0 -2px #569cd6; }
+  .drop-after { box-shadow: 0 2px #569cd6; }
   .agent {
     position: relative;
     padding: 5px 8px;
@@ -427,7 +429,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // Use multiple strategies since embedded WebViews may not fire focus events.
     // Never steal focus from an open context menu or label editor.
     function focusSearch() {
-      if (pointerDown || ctxMenu || labelEditorOpen || dragSession) return;
+      if (pointerDown || ctxMenu || labelEditorOpen || dragging) return;
       document.getElementById('search').focus({ preventScroll: true });
     }
     let hadFocus = document.hasFocus();
@@ -539,8 +541,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // Collapsed repo keys; persists across the per-second re-render.
     const collapsedRepos = new Set();
     const collapsedGroups = new Set();
-    let dragSession = null;
+    let dragging = null;
     let dropTarget = null;
+    let dropStyle = '';
     const groupColors = [
       ['Blue', '#79b8f3'], ['Green', '#71c9a2'], ['Purple', '#c1a0ec'],
       ['Orange', '#f1ad79'], ['Pink', '#eaa1c5'], ['Yellow', '#e2c477'],
@@ -621,38 +624,46 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     sessionsPanel.addEventListener('dragstart', (e) => {
       const handle = e.target.closest('.drag-handle');
       if (!handle) return;
-      const id = handle.closest('.agent').dataset.session;
-      dragSession = allSessions.find(s => s.id === id) || null;
-      if (!dragSession) {
-        e.preventDefault();
-        return;
-      }
+      dragging = {
+        repo: handle.closest('.repo-group').dataset.key,
+        group: handle.closest('.custom-group')?.dataset.group || '',
+        session: handle.closest('.agent')?.dataset.session || '',
+      };
       pointerDown = false;
       e.dataTransfer.effectAllowed = 'move';
-      // WebKit needs a payload to start a drag. Keep the session ID in the panel.
-      e.dataTransfer.setData('text/plain', 'Move session');
+      // WebKit needs a payload to start a drag. Keep the IDs in the panel.
+      e.dataTransfer.setData('text/plain', dragging.session ? 'Move session' : 'Move group');
     });
 
-    function dragDestination(target) {
-      if (!dragSession) return null;
-      const area = target.closest('.custom-group, .repo-header');
-      if (!area || area.closest('.repo-group').dataset.key !== (dragSession.root_repo || ''))
+    function dragDestination(e) {
+      if (!dragging) return null;
+      const area = dragging.session
+        ? e.target.closest('.custom-group, .repo-header')
+        : e.target.closest('.custom-group') || e.target.closest('.agent');
+      if (!area || area.closest('.repo-group').dataset.key !== dragging.repo)
         return null;
       const group = area.dataset.group || '';
-      return group === (dragSession.group?.id || '') ? null : area;
+      if (group === dragging.group) return null;
+      if (dragging.session) return {area, group, style: 'drop-target'};
+      const target = group ? `group:${group}` : `session:${area.dataset.session}`;
+      const anchor = group ? area.querySelector('.custom-group-header') : area;
+      const rect = anchor.getBoundingClientRect();
+      const before = e.clientY < rect.top + rect.height / 2;
+      return {area, target, before, style: before ? 'drop-before' : 'drop-after'};
     }
 
-    function highlightDropTarget(target) {
-      if (dropTarget === target) return;
-      dropTarget?.classList.remove('drop-target');
+    function highlightDropTarget(target, style = '') {
+      if (dropTarget === target && dropStyle === style) return;
+      dropTarget?.classList.remove(dropStyle);
       dropTarget = target;
-      dropTarget?.classList.add('drop-target');
+      dropStyle = style;
+      dropTarget?.classList.add(style);
     }
 
     sessionsPanel.addEventListener('dragover', (e) => {
-      const area = dragDestination(e.target);
-      highlightDropTarget(area);
-      if (!area) return;
+      const destination = dragDestination(e);
+      highlightDropTarget(destination?.area || null, destination?.style);
+      if (!destination) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
     });
@@ -660,16 +671,18 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       if (dropTarget && !dropTarget.contains(e.relatedTarget)) highlightDropTarget(null);
     });
     sessionsPanel.addEventListener('drop', (e) => {
-      const area = dragDestination(e.target);
-      if (!area) return;
+      const destination = dragDestination(e);
+      if (!destination) return;
       e.preventDefault();
-      const session = dragSession.id;
-      dragSession = null;
+      const {session, group} = dragging;
+      dragging = null;
       highlightDropTarget(null);
-      editGroup({action: 'move', session, group: area.dataset.group || ''});
+      editGroup(session ? {action: 'move', session, group: destination.group} : {
+        action: 'reorder', group, target: destination.target, before: destination.before,
+      });
     });
     document.addEventListener('dragend', () => {
-      dragSession = null;
+      dragging = null;
       highlightDropTarget(null);
     });
 
@@ -690,18 +703,31 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       openMenu(items, x, y);
     }
 
+    function sidebarItems(sessions) {
+      const items = new Map();
+      for (const s of sessions) {
+        const key = s.group ? `group:${s.group.id}` : `session:${s.id}`;
+        if (!items.has(key)) items.set(key, []);
+        items.get(key).push(s);
+      }
+      return [...items].sort(([, a], [, b]) =>
+        (a[0].sidebar_position ?? 0) - (b[0].sidebar_position ?? 0));
+    }
+
+    function itemsInRepo(repo) {
+      return sidebarItems(allSessions.filter(s => (s.root_repo || '') === repo));
+    }
+
     function openGroupPicker(session, x, y) {
       if (!session) return;
-      const repo = session.root_repo || '';
-      const groups = new Map(allSessions
-        .filter(s => s.group && (s.root_repo || '') === repo)
-        .map(s => [s.group.id, s.group]));
+      const groups = itemsInRepo(session.root_repo || '')
+        .map(([, rows]) => rows[0].group).filter(Boolean);
       const items = [['New group…', () => openTextEditor(
         sessionCard(session.id), '', 'Group name', name => {
           if (name) editGroup({action: 'create', session: session.id, name,
-            color: groupColors[groups.size % groupColors.length][1]});
+            color: groupColors[groups.length % groupColors.length][1]});
         })]];
-      for (const group of groups.values()) {
+      for (const group of groups) {
         if (group.id !== session.group?.id)
           items.push([group.name, () => editGroup({
             action: 'move', session: session.id, group: group.id,
@@ -712,16 +738,27 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     function openGroupMenu(header, x, y) {
       const id = header.closest('.custom-group').dataset.group;
-      const group = allSessions.find(s => s.group?.id === id)?.group;
+      const itemsInOrder = itemsInRepo(header.closest('.repo-group').dataset.key);
+      const index = itemsInOrder.findIndex(([key]) => key === `group:${id}`);
+      const group = itemsInOrder[index]?.[1][0].group;
       if (!group) return;
-      openMenu([
+      const items = [
         ['Rename group…', () => openTextEditor(header, group.name, 'Group name', name => {
           if (name) editGroup({action: 'rename', group: id, name});
         })],
         ['Change color…', () => openMenu(groupColors.map(([name, color]) =>
           [name, () => editGroup({action: 'recolor', group: id, color})]), x, y)],
-        ['Ungroup sessions', () => editGroup({action: 'ungroup', group: id})],
-      ], x, y);
+      ];
+      const above = itemsInOrder[index - 1]?.[0];
+      const below = itemsInOrder[index + 1]?.[0];
+      if (above) items.push(['Move up', () => editGroup({
+        action: 'reorder', group: id, target: above, before: true,
+      })]);
+      if (below) items.push(['Move down', () => editGroup({
+        action: 'reorder', group: id, target: below, before: false,
+      })]);
+      items.push(['Ungroup sessions', () => editGroup({action: 'ungroup', group: id})]);
+      openMenu(items, x, y);
     }
 
     function openMenu(items, x, y) {
@@ -1038,7 +1075,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       // pointerDown suppresses stray interval writes mid-click; renders a
       // click handler asked for are safe — the click already dispatched.
       // An open context menu or label editor is also left untouched.
-      if (force || (!pointerDown && !labelEditorOpen && !ctxMenu && !dragSession)) {
+      if (force || (!pointerDown && !labelEditorOpen && !ctxMenu && !dragging)) {
         const reveal = sessions.find(s => s.id === pendingFocusReveal);
         if (reveal) {
           collapsedRepos.delete(reveal.root_repo || '');
@@ -1079,21 +1116,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     function renderGroup(repoName, repoPath, items) {
       const isCollapsed = collapsedRepos.has(repoPath);
-      let sessionsHtml = '';
-      if (!isCollapsed) {
-        const groups = new Map();
-        const looseCards = [];
-        for (const session of items) {
-          if (!session.group) {
-            looseCards.push(renderCard(session));
-            continue;
-          }
-          const id = session.group.id;
-          if (!groups.has(id)) groups.set(id, []);
-          groups.get(id).push(session);
-        }
-        sessionsHtml = [...groups.values()].map(renderCustomGroup).join('') + looseCards.join('');
-      }
+      const sessionsHtml = isCollapsed ? '' : sidebarItems(items).map(([, rows]) =>
+        rows[0].group ? renderCustomGroup(rows) : renderCard(rows[0])).join('');
       const escapedPath = esc(repoPath).replace(/"/g, '&quot;');
       const titleAttr = repoPath ? ` title="${escapedPath}"` : '';
       const chevron = isCollapsed ? '&#9656;' : '&#9662;';
@@ -1128,6 +1152,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
             <span class="group-name">${name}</span>
             <span class="group-summary">${groupSummary(items)}</span>
           </button>
+          <span class="drag-handle" draggable="true" title="Drag to reorder group"
+                aria-hidden="true">⠿</span>
           <button type="button" class="menu-trigger" aria-label="Group actions">⋯</button>
         </div>
         ${collapsed ? '' : items.map(renderCard).join('')}
@@ -1294,7 +1320,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         if (eventsSource !== es) return;
         es.socket.send(JSON.stringify({
           event: 'panel-health', visible: !document.hidden,
-          busy: !!(pointerDown || labelEditorOpen || ctxMenu || dragSession ||
+          busy: !!(pointerDown || labelEditorOpen || ctxMenu || dragging ||
             document.getElementById('search').value),
           data_age_ms: lastSuccessfulPollAt ? Date.now() - lastSuccessfulPollAt : null,
         }));

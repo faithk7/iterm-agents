@@ -117,6 +117,36 @@ async function waitFor(condition, message) {
 }
 (async () => {
   await waitFor(() => card(4), 'initial cards');
+  let dataTransfer;
+  function startDrag(handle) {
+    handle.dispatchEvent(new PointerEvent('pointerdown',
+      {bubbles: true, button: 0, pointerType: 'mouse'}));
+    dataTransfer = new DataTransfer();
+    handle.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer}));
+  }
+  function drag(target, type, clientY = 0) {
+    return !target.dispatchEvent(new DragEvent(type,
+      {bubbles: true, cancelable: true, dataTransfer, clientY}));
+  }
+  createGroup(2, 'Placement');
+  await waitFor(() => groupOf(2), 'create group in middle');
+  check(card(1).nextElementSibling === groupOf(2) && groupOf(2).nextElementSibling === card(3),
+    'a new group takes its card’s position');
+  groupMenu(groupOf(2));
+  choose('Move down');
+  await waitFor(() => card(3).nextElementSibling === groupOf(2), 'move down past a loose card');
+  groupMenu(groupOf(2));
+  choose('Move up');
+  await waitFor(() => groupOf(2).nextElementSibling === card(3), 'move up past a loose card');
+  startDrag(groupOf(2).querySelector('.drag-handle'));
+  const looseTop = card(1).getBoundingClientRect().top + 1;
+  check(drag(card(1), 'dragover', looseTop) && drag(card(1), 'drop', looseTop),
+    'drop group before a loose card');
+  await waitFor(() => groupOf(2).nextElementSibling === card(1), 'drag reorders against loose card');
+  groupMenu(groupOf(2));
+  choose('Ungroup sessions');
+  await waitFor(() => card(2) && !groupOf(2), 'ungroup placement test session');
+
   createGroup(1, 'Release <review>');
   await waitFor(() => groupOf(1), 'create group');
   check(nameOf(groupOf(1)) === 'Release <review>', 'escape group name');
@@ -154,19 +184,52 @@ async function waitFor(condition, message) {
   createGroup(3, 'Fixes');
   await waitFor(() => groupOf(3), 'second group');
 
-  const handle = card(1).querySelector('.drag-handle');
-  handle.dispatchEvent(new PointerEvent('pointerdown',
-    {bubbles: true, button: 0, pointerType: 'mouse'}));
-  const dataTransfer = new DataTransfer();
-  handle.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer}));
-  function drag(target, type) {
-    return !target.dispatchEvent(new DragEvent(type, {bubbles: true, cancelable: true, dataTransfer}));
-  }
+  const order = () => [...groupOf(1).closest('.repo-group').querySelectorAll('.group-name')]
+    .map(name => name.textContent).join(', ');
+  check(order() === 'Review, Fixes', 'new groups are appended');
+  const fixesId = groupOf(3).dataset.group;
+  const fixes = () => document.querySelector(`.custom-group[data-group="${fixesId}"]`);
+  fixes().querySelector('.group-toggle').click();
+  check(!card(3), 'collapse group before moving');
+
+  startDrag(fixes().querySelector('.drag-handle'));
+  const review = groupOf(1);
+  const header = review.querySelector('.custom-group-header');
+  const rect = header.getBoundingClientRect();
+  check(drag(header, 'dragover', rect.bottom - 1) && review.classList.contains('drop-after'),
+    'show insertion marker after target');
+  check(drag(header, 'dragover', rect.top + 1) && review.classList.contains('drop-before'),
+    'show insertion marker before target');
+  check(drag(header, 'drop', rect.top + 1), 'drop group before existing group');
+  await waitFor(() => order() === 'Fixes, Review', 'drag reorders group');
+  check(!card(3), 'moving a group preserves collapse');
+  fixes().querySelector('.group-toggle').click();
+
+  groupMenu(fixes());
+  choose('Move down');
+  await waitFor(() => order() === 'Review, Fixes', 'move group down from menu');
+  groupMenu(fixes());
+  choose('Move up');
+  await waitFor(() => order() === 'Fixes, Review', 'move group up from menu');
+  groupMenu(fixes());
+  choose('Move down');
+  await waitFor(() => order() === 'Review, Fixes', 'restore group order');
+
+  createGroup(4, 'Other repo group');
+  await waitFor(() => groupOf(4), 'group in another repo');
+  const crossRepo = await fetch('/api/groups', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'reorder', group: fixesId,
+      target: 'group:' + groupOf(4).dataset.group, before: true})});
+  check(crossRepo.status === 409, 'reject group reordering across repos');
+
+  startDrag(card(1).querySelector('.drag-handle'));
   check(!drag(card(4).closest('.repo-group').querySelector('.repo-header'), 'dragover'),
     'foreign repo is not a drop target');
   check(drag(groupOf(3), 'dragover') && drag(groupOf(3), 'drop'), 'drop in same repo');
   await waitFor(() => nameOf(groupOf(1)) === 'Fixes', 'drag membership');
   check(nameOf(groupOf(2)) === 'Review', 'part of old group remains');
+  check(order() === 'Review, Fixes', 'changing membership preserves group order');
   check((await (await fetch('/api/sessions?cached=1')).json())[0].group.name === 'Fixes',
     'group membership is shared by fresh panels');
 
