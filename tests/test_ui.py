@@ -493,7 +493,7 @@ assert.ok(classes.has('idle'));
 assert.ok(!classes.has('awaiting-user'));
 assert.ok(hintRemoved);
 assert.equal(status.innerHTML, '&#9675; idle');
-assert.ok(!element('sessions').innerHTML.includes('hidden'));
+assert.ok(!element('sessions').innerHTML.includes('data-session="two"'));
 assert.ok(element('count').textContent.includes('0 done'));
 (async () => {
   const pressedCard = { dataset: {session: 'two'} };

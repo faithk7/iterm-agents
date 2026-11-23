@@ -77,7 +77,7 @@ Tool registration is global, so a rebuild can replace every Agents view.
 `recovery.py` shares tool registration between the server and `--reload-panel`.
 The CLI discovers and verifies the local monitor through a per-user runtime
 file and bypasses the monitor's single-instance lock. Rebuilding views leaves
-backend labels and completion state intact, but resets view-local search and
+backend groups, labels, and completion state intact, but resets view-local search and
 collapse state. It does not restart iTerm2 or the monitored CLIs.
 
 Run `uv run pytest`, `uv run ruff check src/`,

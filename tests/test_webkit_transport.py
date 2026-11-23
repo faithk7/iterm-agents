@@ -44,7 +44,8 @@ int main(int argc, char **argv) {
         Probe *probe = [Probe new];
         WKWebViewConfiguration *config = [WKWebViewConfiguration new];
         [config.userContentController addScriptMessageHandler:probe name:@"result"];
-        probe.view = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300) configuration:config];
+    double width = argc > 2 ? [[NSString stringWithUTF8String:argv[2]] doubleValue] : 400;
+    probe.view = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, width, 300) configuration:config];
         [probe.view loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithUTF8String:argv[1]]]]];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ puts("TIMEOUT"); exit(2); });
         [NSApp run];
@@ -59,6 +60,159 @@ int main(int argc, char **argv) {
         check=True, capture_output=True, timeout=30,
     )
     return binary
+
+
+async def test_repo_groups_in_narrow_webkit_panel(webkit_probe: Path) -> None:
+    server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+    rows = [
+        {
+            "id": f"s-{number}",
+            "name": f"agent {number}",
+            "window_id": "w1",
+            "repo": repo,
+            "root_repo": f"~/projects/{repo}",
+            "branch": branch,
+            "agent_state": "running",
+            "agent_type": "codex",
+        }
+        for number, repo, branch in (
+            (1, "repo", "main"), (2, "repo", "worktree"), (3, "repo", "fix"), (4, "other", "main")
+        )
+    ]
+    server._scan_cache = (time.monotonic(), rows)
+    server._scan_sessions = AsyncMock(return_value=rows)
+    server._activate_session = AsyncMock()
+    html = AGENT_MONITOR_HTML.replace(
+        "<script>", """<script>window.name = 'iterm-agents:window:w1';
+window.addEventListener('error', e => window.webkit.messageHandlers.result
+  .postMessage('DONE ' + e.message));
+""", 1
+    ).replace("</body>", r'''
+<script>
+const check = (pass, message) => { if (!pass) throw new Error(message); };
+const card = id => document.querySelector(`.agent[data-session="s-${id}"]`);
+const groupOf = id => card(id)?.closest('.custom-group');
+const nameOf = group => group?.querySelector('.group-name').textContent;
+const choose = label => [...document.querySelectorAll('.ctx-item')]
+  .find(item => item.textContent === label).click();
+const groupMenu = group => group.querySelector('.menu-trigger').click();
+function enterName(name) {
+  const input = document.querySelector('.label-editor input');
+  input.value = name;
+  input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+}
+function createGroup(id, name) {
+  card(id).dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}));
+  choose('Add to group…');
+  choose('New group…');
+  enterName(name);
+}
+async function waitFor(condition, message) {
+  const deadline = performance.now() + 2000;
+  while (performance.now() < deadline) {
+    if (condition()) return;
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  throw new Error(message + ' ' + document.getElementById('group-status').textContent);
+}
+(async () => {
+  await waitFor(() => card(4), 'initial cards');
+  createGroup(1, 'Release <review>');
+  await waitFor(() => groupOf(1), 'create group');
+  check(nameOf(groupOf(1)) === 'Release <review>', 'escape group name');
+  check(groupOf(1).closest('.repo-group').dataset.key === '~/projects/repo', 'repo nesting');
+  check(document.documentElement.scrollWidth === 240, 'narrow panel does not overflow');
+  const first = groupOf(1).dataset.group;
+  const rejected = await fetch('/api/groups', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'move', session: 's-4', group: first})});
+  check(rejected.status === 409, 'reject moves across repos');
+  card(2).querySelector('.menu-trigger').click();
+  choose('Add to group…');
+  choose('Release <review>');
+  await waitFor(() => groupOf(2)?.dataset.group === first, 'join via worktree');
+
+  groupOf(1).querySelector('.group-toggle').click();
+  check(!card(1) && document.querySelector('.group-summary').textContent === '2 running',
+    'collapsed group status');
+  const search = document.getElementById('search');
+  search.value = 'release <review>';
+  search.dispatchEvent(new Event('input'));
+  check(card(1) && card(2) && !card(3), 'search expands matching group');
+  search.value = '';
+  search.dispatchEvent(new Event('input'));
+
+  groupMenu(groupOf(1));
+  choose('Rename group…');
+  enterName('Review');
+  await waitFor(() => nameOf(groupOf(1)) === 'Review', 'rename group');
+  groupMenu(groupOf(1));
+  choose('Change color…');
+  choose('Purple');
+  await waitFor(() => groupOf(1)?.style.getPropertyValue('--group-color') === '#c1a0ec',
+    'recolor group');
+  createGroup(3, 'Fixes');
+  await waitFor(() => groupOf(3), 'second group');
+
+  const handle = card(1).querySelector('.drag-handle');
+  handle.dispatchEvent(new PointerEvent('pointerdown',
+    {bubbles: true, button: 0, pointerType: 'mouse'}));
+  const dataTransfer = new DataTransfer();
+  handle.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer}));
+  function drag(target, type) {
+    return !target.dispatchEvent(new DragEvent(type, {bubbles: true, cancelable: true, dataTransfer}));
+  }
+  check(!drag(card(4).closest('.repo-group').querySelector('.repo-header'), 'dragover'),
+    'foreign repo is not a drop target');
+  check(drag(groupOf(3), 'dragover') && drag(groupOf(3), 'drop'), 'drop in same repo');
+  await waitFor(() => nameOf(groupOf(1)) === 'Fixes', 'drag membership');
+  check(nameOf(groupOf(2)) === 'Review', 'part of old group remains');
+  check((await (await fetch('/api/sessions?cached=1')).json())[0].group.name === 'Fixes',
+    'group membership is shared by fresh panels');
+
+  card(1).querySelector('.menu-trigger').click();
+  choose('Remove from group');
+  await waitFor(() => card(1) && !groupOf(1), 'remove member');
+  groupMenu(groupOf(3));
+  choose('Ungroup sessions');
+  await waitFor(() => card(3) && !groupOf(3), 'ungroup all members');
+  card(1).click();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  window.webkit.messageHandlers.result.postMessage('DONE groups worked');
+})().catch(error => window.webkit.messageHandlers.result
+  .postMessage('DONE ' + error.message + '\n' + error.stack));
+</script></body>''')
+    app = web.Application()
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(text=html, content_type="text/html")
+
+    app.router.add_get("/", page)
+    app.router.add_get("/api/ws", server._handle_ws)
+    app.router.add_get("/api/sessions", server._handle_sessions)
+    app.router.add_get("/api/focus", server._handle_focus)
+    app.router.add_post("/api/groups", server._handle_group)
+    runner = web.AppRunner(app, shutdown_timeout=0.1)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    process = await asyncio.create_subprocess_exec(
+        str(webkit_probe), f"http://127.0.0.1:{port}/", "240",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        output, errors = await asyncio.wait_for(process.communicate(), timeout=15)
+        assert process.returncode == 0 and output.strip() == b"DONE groups worked", (
+            output.decode() + errors.decode()
+        )
+        server._activate_session.assert_awaited_once_with("s-1")
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        await runner.cleanup()
+        await asyncio.gather(*server._detached_tasks, return_exceptions=True)
 
 
 async def test_six_panel_streams_do_not_queue_a_card_click(webkit_probe: Path) -> None:

@@ -6,10 +6,12 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 import weakref
 from collections.abc import Callable, Coroutine
 from typing import Any
+from uuid import uuid4
 
 import iterm2
 import iterm2.app
@@ -23,7 +25,7 @@ from aiohttp import web
 
 from iterm_agents.detector import detect_agents
 from iterm_agents.git_info import get_git_info
-from iterm_agents.models import AgentInfo, AgentState, AgentType, GitInfo, SessionRow
+from iterm_agents.models import AgentInfo, AgentState, AgentType, GitInfo, SessionGroup, SessionRow
 from iterm_agents.recovery import register_panel
 from iterm_agents.screen_signals import (
     cursor_activity_signature,
@@ -102,6 +104,8 @@ class AgentMonitorServer:
         # Cached rows contain observations; completion and labels are added
         # to response copies so acknowledgements also affect cached polls.
         self._session_state = SessionStateTracker()
+        self._groups: dict[str, SessionGroup] = {}
+        self._session_group_ids: dict[str, str] = {}
         self._cursor_footer: dict[str, tuple[str, float]] = {}
         self._scan_lock = asyncio.Lock()
         self._scan_rpc_gate = asyncio.Semaphore(self._SCAN_RPC_CONCURRENCY)
@@ -155,6 +159,7 @@ class AgentMonitorServer:
         app.router.add_get("/api/focus", self._handle_focus)
         app.router.add_get("/api/clear", self._handle_clear)
         app.router.add_get("/api/label", self._handle_label)
+        app.router.add_post("/api/groups", self._handle_group)
         app.router.add_get("/api/events", self._handle_sse)
         app.router.add_get("/api/ws", self._handle_ws)
         app.router.add_get("/api/diagnostics", self._handle_diagnostics)
@@ -818,8 +823,16 @@ class AgentMonitorServer:
         )
         window_id = request.query.get("window", "") if request is not None else ""
         focused_id = self._focused_by_window.get(window_id)
+        live_memberships = {}
         for row in sessions:
             row["focused"] = bool(window_id and row["id"] == focused_id)
+            group = self._groups.get(self._session_group_ids.get(row["id"], ""))
+            if group is not None and group["root_repo"] == row.get("root_repo", ""):
+                row["group"] = group
+                live_memberships[row["id"]] = group["id"]
+        if fresh:
+            self._session_group_ids = live_memberships
+            self._prune_groups()
         # Cached rows can predate a new window. Their absence is not evidence
         # that its confirmed binding is invalid; use the native window snapshot.
         owner = "unknown"
@@ -1067,6 +1080,74 @@ class AgentMonitorServer:
             return web.Response(text="no session id", status=400)
         self._session_state.set_label(session_id, request.query.get("label", ""))
         return web.Response(text="ok")
+
+    def _prune_groups(self) -> None:
+        used = set(self._session_group_ids.values())
+        self._groups = {key: group for key, group in self._groups.items() if key in used}
+
+    async def _handle_group(self, request: web.Request) -> web.Response:
+        """Edit repo-scoped groups of live session cards."""
+        if request.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType()
+        try:
+            data = await request.json()
+        except ValueError as error:
+            raise web.HTTPBadRequest(text="Invalid JSON") from error
+        if not isinstance(data, dict):
+            raise web.HTTPBadRequest(text="Expected an object")
+
+        action = data.get("action")
+        session_id = data.get("session", "")
+        group_id = data.get("group", "")
+        name = data.get("name", "")
+        color = data.get("color", "")
+        if not all(isinstance(value, str) for value in (action, session_id, group_id, name, color)):
+            raise web.HTTPBadRequest(text="Expected text fields")
+        name = name.strip()
+        if action in ("create", "rename") and not 1 <= len(name) <= 40:
+            raise web.HTTPBadRequest(text="Group names must be 1 to 40 characters")
+        if action in ("create", "recolor") and not re.fullmatch(r"#[0-9a-f]{6}", color):
+            raise web.HTTPBadRequest(text="Invalid group color")
+
+        group = self._groups.get(group_id) if group_id else None
+        if action in ("create", "move"):
+            row = next((row for row in self._scan_cache[1] if row["id"] == session_id), None)
+            if row is None:
+                raise web.HTTPNotFound(text="Session is no longer available")
+            repo = row.get("root_repo", "")
+            if action == "create":
+                group_id = uuid4().hex
+                self._groups[group_id] = {
+                    "id": group_id,
+                    "root_repo": repo,
+                    "name": name,
+                    "color": color,
+                }
+            elif group_id and (group is None or group["root_repo"] != repo):
+                raise web.HTTPConflict(text="That group is no longer in this repo")
+            if group_id:
+                self._session_group_ids[session_id] = group_id
+            else:
+                self._session_group_ids.pop(session_id, None)
+        elif action in ("rename", "recolor", "ungroup"):
+            if group is None:
+                raise web.HTTPNotFound(text="Group is no longer available")
+            if action == "rename":
+                group["name"] = name
+            elif action == "recolor":
+                group["color"] = color
+            else:
+                self._session_group_ids = {
+                    session: key
+                    for session, key in self._session_group_ids.items()
+                    if key != group_id
+                }
+        else:
+            raise web.HTTPBadRequest(text="Unknown group action")
+
+        self._prune_groups()
+        self._spawn_detached(self._broadcast_sse("sessions-changed"))
+        return web.Response(status=204)
 
     async def _screen_text(self, session: iterm2.session.Session) -> str | None:
         """The session's visible screen as text, or None when the read fails."""

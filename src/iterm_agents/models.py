@@ -73,6 +73,13 @@ class _SessionMetadata(TypedDict):
     focused: bool
 
 
+class SessionGroup(TypedDict):
+    id: str
+    root_repo: str
+    name: str
+    color: str
+
+
 class SessionRow(_SessionMetadata, total=False):
     """JSON row shared by scans, display-state tracking, and the panel.
 
@@ -83,3 +90,4 @@ class SessionRow(_SessionMetadata, total=False):
 
     label: str
     awaiting_user: bool
+    group: SessionGroup

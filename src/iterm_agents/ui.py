@@ -61,7 +61,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   .focus-hint[hidden] { display: none; }
   .connection-status { color: #d7ba7d; margin-bottom: 8px; font-size: 11px; }
-  .connection-status[hidden] { display: none; }
+  .connection-status[hidden], #group-status:empty { display: none; }
   /* WebKit resolves :window-inactive from this WebView's own NSWindow, so the
      probe's scrollbar width reveals whether the panel's window is key. */
   #owner-probe {
@@ -96,6 +96,58 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     line-height: 1;
   }
   .repo-header:hover .chevron { color: #d4d4d4; }
+  .custom-group {
+    margin: 5px 0 5px 5px;
+    padding-left: 6px;
+    border-left: 2px solid var(--group-color);
+  }
+  .custom-group-header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--group-color);
+  }
+  .group-toggle, .menu-trigger {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .group-toggle {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    padding: 5px 2px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .group-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .group-summary {
+    margin-left: auto;
+    color: #aaa;
+    font-size: 10px;
+    font-weight: 400;
+    white-space: nowrap;
+  }
+  .menu-trigger, .drag-handle {
+    color: #aaa;
+    padding: 0 3px;
+    line-height: 1.35;
+  }
+  .menu-trigger:hover, .drag-handle:hover { color: #fff; }
+  .drag-handle { cursor: grab; -webkit-user-drag: element; }
+  .card-actions { display: flex; align-items: center; gap: 3px; }
+  .drop-target { outline: 1px solid #569cd6; outline-offset: 1px; }
   .agent {
     position: relative;
     padding: 5px 8px;
@@ -186,15 +238,23 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     border-radius: 4px;
     box-shadow: 0 4px 12px rgba(0,0,0,0.5);
     outline: none;
+    max-width: calc(100vw - 8px);
+    max-height: calc(100vh - 8px);
+    overflow: auto;
   }
   .ctx-item {
+    display: block;
+    width: 100%;
+    border: none;
+    background: transparent;
+    text-align: left;
     padding: 4px 12px;
     font-size: 11px;
     color: #d4d4d4;
     cursor: pointer;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
-  .ctx-item:hover { background: #094771; }
+  .ctx-item:hover, .ctx-item:focus-visible { background: #094771; }
   .session-name { color: #d4d4d4; font-size: 11px; margin-top: 2px; }
   .branch-row {
     display: flex;
@@ -237,12 +297,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     </span>
   </div>
   <input type="text" class="search-box" id="search"
-         placeholder="Search by name, repo, branch..."
-         oninput="filterSessions()">
+         placeholder="Search sessions and groups…"
+         oninput="searchSessions()">
   <button class="focus-hint" id="focus-hint" onclick="bindPanelWindow()"
           aria-live="polite">Click here to enable the blue focus marker</button>
   <div id="owner-probe" aria-hidden="true"><div style="height: 100px"></div></div>
   <div class="connection-status" id="connection-status" role="status" hidden></div>
+  <div class="connection-status" id="group-status" role="status"></div>
   <div id="sessions"><div class="no-results">Loading sessions…</div></div>
   <div class="count" id="count"></div>
 
@@ -262,13 +323,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     // Bound the entire request, including JSON decoding. The deadline also
     // releases callers if a stalled transport fails to honour cancellation.
-    async function panelRequest(url, json = false) {
+    async function panelRequest(url, json = false, options = {}) {
       const controller = new AbortController();
       let timer;
       try {
         return await Promise.race([
           (async () => {
-            const response = await fetch(url, {signal: controller.signal});
+            const response = await fetch(url, {...options, signal: controller.signal});
             if (response.ok === false) throw new Error('HTTP ' + response.status);
             return json ? {response, data: await response.json()} : response;
           })(),
@@ -366,7 +427,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     // Use multiple strategies since embedded WebViews may not fire focus events.
     // Never steal focus from an open context menu or label editor.
     function focusSearch() {
-      if (pointerDown || ctxMenu || labelEditorOpen) return;
+      if (pointerDown || ctxMenu || labelEditorOpen || dragSession) return;
       document.getElementById('search').focus({ preventScroll: true });
     }
     let hadFocus = document.hasFocus();
@@ -384,6 +445,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       bindPanelWindow();
       // The context menu and label editor handle their own keys.
       if (ctxMenu || labelEditorOpen) return;
+      if (e.key === 'Enter' && e.target?.closest?.('button')) return;
       const items = getAgentElements();
       const search = document.getElementById('search');
 
@@ -452,7 +514,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       pressedX = Number.isFinite(e.clientX) ? String(e.clientX) : '';
       pressedY = Number.isFinite(e.clientY) ? String(e.clientY) : '';
       pressedAt = Date.now();
-      activatedOnPress = !!card && e.button === 0 &&
+      activatedOnPress = !!card && !ctxMenu && !labelEditorOpen && e.button === 0 &&
+        !e.target.closest('.drag-handle, .menu-trigger, .label-editor') &&
         (!e.pointerType || e.pointerType === 'mouse');
       if (activatedOnPress) {
         focusSession(card.dataset.session);
@@ -475,8 +538,36 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     // Collapsed repo keys; persists across the per-second re-render.
     const collapsedRepos = new Set();
+    const collapsedGroups = new Set();
+    let dragSession = null;
+    let dropTarget = null;
+    const groupColors = [
+      ['Blue', '#79b8f3'], ['Green', '#71c9a2'], ['Purple', '#c1a0ec'],
+      ['Orange', '#f1ad79'], ['Pink', '#eaa1c5'], ['Yellow', '#e2c477'],
+    ];
+    const sessionsPanel = document.getElementById('sessions');
 
-    document.getElementById('sessions').addEventListener('click', (e) => {
+    sessionsPanel.addEventListener('click', (e) => {
+      const menuButton = e.target.closest('.menu-trigger');
+      if (menuButton) {
+        const {left, bottom} = menuButton.getBoundingClientRect();
+        const group = menuButton.closest('.custom-group-header');
+        if (group) openGroupMenu(group, left, bottom);
+        else openCtxMenu(menuButton.closest('.agent').dataset.session, left, bottom);
+        return;
+      }
+      const groupToggle = e.target.closest('.group-toggle');
+      if (groupToggle) {
+        const id = groupToggle.closest('.custom-group').dataset.group;
+        if (!collapsedGroups.delete(id)) collapsedGroups.add(id);
+        filterSessions(true);
+        if (e.detail === 0) {
+          document.querySelector(`.custom-group[data-group="${id}"] .group-toggle`)
+            ?.focus({preventScroll: true});
+        }
+        return;
+      }
+      if (e.target.closest('.drag-handle')) return;
       const header = e.target.closest('.repo-header');
       if (header) {
         toggleGroup(header.parentElement.dataset.key);
@@ -514,46 +605,165 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     let ctxMenu = null;
     let labelEditorOpen = false;
 
-    document.getElementById('sessions').addEventListener('contextmenu', (e) => {
+    sessionsPanel.addEventListener('contextmenu', (e) => {
+      const group = e.target.closest('.custom-group-header');
+      if (group) {
+        e.preventDefault();
+        openGroupMenu(group, e.clientX, e.clientY);
+        return;
+      }
       const card = e.target.closest('.agent');
       if (!card) return;
       e.preventDefault();
       openCtxMenu(card.dataset.session, e.clientX, e.clientY);
     });
 
+    sessionsPanel.addEventListener('dragstart', (e) => {
+      const handle = e.target.closest('.drag-handle');
+      if (!handle) return;
+      const id = handle.closest('.agent').dataset.session;
+      dragSession = allSessions.find(s => s.id === id) || null;
+      if (!dragSession) {
+        e.preventDefault();
+        return;
+      }
+      pointerDown = false;
+      e.dataTransfer.effectAllowed = 'move';
+      // WebKit needs a payload to start a drag. Keep the session ID in the panel.
+      e.dataTransfer.setData('text/plain', 'Move session');
+    });
+
+    function dragDestination(target) {
+      if (!dragSession) return null;
+      const area = target.closest('.custom-group, .repo-header');
+      if (!area || area.closest('.repo-group').dataset.key !== (dragSession.root_repo || ''))
+        return null;
+      const group = area.dataset.group || '';
+      return group === (dragSession.group?.id || '') ? null : area;
+    }
+
+    function highlightDropTarget(target) {
+      if (dropTarget === target) return;
+      dropTarget?.classList.remove('drop-target');
+      dropTarget = target;
+      dropTarget?.classList.add('drop-target');
+    }
+
+    sessionsPanel.addEventListener('dragover', (e) => {
+      const area = dragDestination(e.target);
+      highlightDropTarget(area);
+      if (!area) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    sessionsPanel.addEventListener('dragleave', (e) => {
+      if (dropTarget && !dropTarget.contains(e.relatedTarget)) highlightDropTarget(null);
+    });
+    sessionsPanel.addEventListener('drop', (e) => {
+      const area = dragDestination(e.target);
+      if (!area) return;
+      e.preventDefault();
+      const session = dragSession.id;
+      dragSession = null;
+      highlightDropTarget(null);
+      editGroup({action: 'move', session, group: area.dataset.group || ''});
+    });
+    document.addEventListener('dragend', () => {
+      dragSession = null;
+      highlightDropTarget(null);
+    });
+
     function openCtxMenu(sessionId, x, y) {
-      closeCtxMenu();
-      closeLabelEditor();
       const session = allSessions.find(s => s.id === sessionId);
       const items = [
-        ['label', 'Label\u2026'],
-        ['focus', 'Focus session'],
+        ['Add to group…', () => openGroupPicker(session, x, y)],
+        ['Label…', () => openLabelEditor(sessionId)],
+        ['Focus session', () => focusSession(sessionId)],
       ];
-      if (session && session.agent_state === 'awaiting_user')
-        items.push(['read', 'Mark as read']);
+      if (session?.group) {
+        items.splice(1, 0, ['Remove from group', () => editGroup({
+          action: 'move', session: sessionId,
+        })]);
+      }
+      if (session?.agent_state === 'awaiting_user')
+        items.push(['Mark as read', () => markSessionRead(sessionId)]);
+      openMenu(items, x, y);
+    }
+
+    function openGroupPicker(session, x, y) {
+      if (!session) return;
+      const repo = session.root_repo || '';
+      const groups = new Map(allSessions
+        .filter(s => s.group && (s.root_repo || '') === repo)
+        .map(s => [s.group.id, s.group]));
+      const items = [['New group…', () => openTextEditor(
+        sessionCard(session.id), '', 'Group name', name => {
+          if (name) editGroup({action: 'create', session: session.id, name,
+            color: groupColors[groups.size % groupColors.length][1]});
+        })]];
+      for (const group of groups.values()) {
+        if (group.id !== session.group?.id)
+          items.push([group.name, () => editGroup({
+            action: 'move', session: session.id, group: group.id,
+          })]);
+      }
+      openMenu(items, x, y);
+    }
+
+    function openGroupMenu(header, x, y) {
+      const id = header.closest('.custom-group').dataset.group;
+      const group = allSessions.find(s => s.group?.id === id)?.group;
+      if (!group) return;
+      openMenu([
+        ['Rename group…', () => openTextEditor(header, group.name, 'Group name', name => {
+          if (name) editGroup({action: 'rename', group: id, name});
+        })],
+        ['Change color…', () => openMenu(groupColors.map(([name, color]) =>
+          [name, () => editGroup({action: 'recolor', group: id, color})]), x, y)],
+        ['Ungroup sessions', () => editGroup({action: 'ungroup', group: id})],
+      ], x, y);
+    }
+
+    function openMenu(items, x, y) {
+      closeCtxMenu();
+      closeLabelEditor();
       const menu = document.createElement('div');
       menu.className = 'ctx-menu';
-      for (const [action, text] of items) {
-        const item = document.createElement('div');
+      for (const [label, action] of items) {
+        const item = document.createElement('button');
+        item.type = 'button';
         item.className = 'ctx-item';
-        item.textContent = text;
+        item.textContent = label;
         item.addEventListener('click', (e) => {
           e.stopPropagation();
           closeCtxMenu();
-          if (action === 'label') openLabelEditor(sessionId);
-          else if (action === 'focus') focusSession(sessionId);
-          else markSessionRead(sessionId);
+          action();
         });
         menu.appendChild(item);
       }
       document.body.appendChild(menu);
-      menu.style.left = Math.min(x, window.innerWidth - menu.offsetWidth - 4) + 'px';
-      menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 4) + 'px';
+      menu.style.left = Math.max(4, Math.min(x, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+      menu.style.top = Math.max(4, Math.min(y, window.innerHeight - menu.offsetHeight - 4)) + 'px';
       // Focus the menu so the webview actually receives the Esc key — a
       // right-click alone does not move keyboard focus off the terminal.
       menu.tabIndex = -1;
       menu.focus({ preventScroll: true });
       ctxMenu = menu;
+    }
+
+    async function editGroup(change) {
+      const status = document.getElementById('group-status');
+      status.textContent = '';
+      try {
+        await panelRequest('/api/groups', false, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(change),
+        });
+      } catch (error) {
+        status.textContent = 'Could not update group. Try again.';
+      }
+      await loadSessions();
     }
 
     function closeCtxMenu() {
@@ -588,7 +798,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       acknowledgeCard(sessionId);
     }
 
-    // Mirror renderGroup's done→idle output exactly — keeps markRendered()
+    // Mirror renderCard's done→idle output exactly — keeps markRendered()
     // truthful without a DOM swap.
     function markCardIdle(card) {
       card.classList.remove('awaiting-user');
@@ -602,36 +812,58 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     function acknowledgeCard(sessionId) {
       const s = allSessions.find(x => x.id === sessionId);
       if (!s || s.agent_state !== 'awaiting_user') return;
+      const currentLayout = renderKey(filteredSessions()) === lastRenderedInput;
       s.agent_state = 'idle';
       s.awaiting_user = false;
       const card = document.querySelector(`.agent[data-session="${sessionId}"]`);
       if (card) markCardIdle(card);
-      markRendered();
+      if (s.group) {
+        const summary = document.querySelector(
+          `.custom-group[data-group="${s.group.id}"] .group-summary`);
+        if (summary) summary.textContent = groupSummary(
+          filteredSessions().filter(row => row.group?.id === s.group.id));
+      }
+      if (currentLayout) markRendered();
+    }
+
+    function sessionCard(sessionId) {
+      return document.querySelector(`.agent[data-session="${CSS.escape(sessionId)}"]`);
     }
 
     function openLabelEditor(sessionId) {
-      const card = document.querySelector(`.agent[data-session="${sessionId}"]`);
-      if (!card) return;
-      closeLabelEditor();
       const session = allSessions.find(s => s.id === sessionId);
+      openTextEditor(sessionCard(sessionId), session?.label || '', 'Label…',
+        label => saveLabel(sessionId, label));
+    }
+
+    function openTextEditor(anchor, value, title, save) {
+      if (!anchor || !anchor.isConnected) return;
+      closeLabelEditor();
       const wrap = document.createElement('div');
       wrap.className = 'label-editor';
       const input = document.createElement('input');
-      input.value = (session && session.label) || '';
-      input.placeholder = 'Label\u2026';
+      input.value = value;
+      input.placeholder = title;
+      input.setAttribute('aria-label', title);
       input.maxLength = 40;
       wrap.appendChild(input);
       wrap.addEventListener('click', e => e.stopPropagation());
-      card.appendChild(wrap);
+      anchor.appendChild(wrap);
       labelEditorOpen = true;
       input.focus();
       input.select();
       input.addEventListener('keydown', (e) => {
         e.stopPropagation();
-        if (e.key === 'Enter') saveLabel(sessionId, input.value.trim());
+        if (e.isComposing) return;
+        if (e.key === 'Enter') {
+          closeLabelEditor();
+          save(input.value.trim());
+        }
         else if (e.key === 'Escape') closeLabelEditor();
       });
-      input.addEventListener('blur', () => setTimeout(closeLabelEditor, 100));
+      input.addEventListener('blur', () => setTimeout(() => {
+        if (wrap.isConnected) closeLabelEditor();
+      }, 100));
     }
 
     function closeLabelEditor() {
@@ -645,7 +877,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         await panelRequest('/api/label?session=' + encodeURIComponent(sessionId) +
                     '&label=' + encodeURIComponent(label));
       } catch(e) {}
-      closeLabelEditor();
       await loadSessions(true);
     }
 
@@ -663,6 +894,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         if (expand) collapsedRepos.delete(key);
         else collapsedRepos.add(key);
       }
+      if (expand) collapsedGroups.clear();
       filterSessions(true);
     }
 
@@ -729,10 +961,20 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const q = document.getElementById('search').value.toLowerCase();
       return q
         ? allSessions.filter(s =>
-            [s.name, s.repo, s.branch, s.path, s.agent_type, s.root_repo].some(
+            [s.name, s.repo, s.branch, s.path, s.agent_type, s.root_repo, s.group?.name].some(
               v => v && v.toLowerCase().includes(q)
             ))
         : allSessions;
+    }
+
+    function searchSessions() {
+      if (document.getElementById('search').value) {
+        for (const session of filteredSessions()) {
+          collapsedRepos.delete(session.root_repo || '');
+          if (session.group) collapsedGroups.delete(session.group.id);
+        }
+      }
+      filterSessions(true);
     }
 
     function filterSessions(force) {
@@ -749,7 +991,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     let pendingFocusReveal = '';
 
     function renderKey(sessions) {
-      return JSON.stringify([sessions, [...collapsedRepos].sort()]);
+      return JSON.stringify([sessions, [...collapsedRepos].sort(), [...collapsedGroups].sort()]);
     }
 
     function buildHtml(sessions) {
@@ -788,7 +1030,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }
 
     function renderSessions(sessions, force) {
-      const container = document.getElementById('sessions');
       const focusedId = allSessions.find(s => s.focused)?.id || '';
       if (focusedId !== lastFocusedSessionId) {
         lastFocusedSessionId = focusedId;
@@ -797,15 +1038,18 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       // pointerDown suppresses stray interval writes mid-click; renders a
       // click handler asked for are safe — the click already dispatched.
       // An open context menu or label editor is also left untouched.
-      if (force || (!pointerDown && !labelEditorOpen && !ctxMenu)) {
+      if (force || (!pointerDown && !labelEditorOpen && !ctxMenu && !dragSession)) {
         const reveal = sessions.find(s => s.id === pendingFocusReveal);
-        if (reveal) collapsedRepos.delete(reveal.root_repo || '');
+        if (reveal) {
+          collapsedRepos.delete(reveal.root_repo || '');
+          if (reveal.group) collapsedGroups.delete(reveal.group.id);
+        }
         const key = renderKey(sessions);
         if (key !== lastRenderedInput) {
           const html = sessions.length ? buildHtml(sessions)
             : '<div class="no-results">No sessions found</div>';
           if (html !== lastRenderedHtml) {
-            container.innerHTML = html;
+            sessionsPanel.innerHTML = html;
             lastRenderedHtml = html;
           }
           lastRenderedInput = key;
@@ -835,52 +1079,100 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
     function renderGroup(repoName, repoPath, items) {
       const isCollapsed = collapsedRepos.has(repoPath);
-      const sessionsHtml = isCollapsed ? '' : items.map(s => {
-        const meta = stateMeta(s.agent_state);
-        const typeBadge = s.agent_type
-          ? `<span class="agent-type ${s.agent_type}">${s.agent_type}</span>`
-          : '';
-        const labelTitle = s.label ? esc(s.label).replace(/"/g, '&quot;') : '';
-        const labelChip = s.label
-          ? `<span class="label" title="${labelTitle}">${esc(s.label)}</span>`
-          : '';
-        const displayName = (s.name || '')
-          .replace(/\\s+\\|.*$/, '')
-          .replace(/\\s+—\\s+[~/].*$/, '')
-          .replace(/\\p{L}/u, c => c.toLowerCase());
-        const nameLine = s.name && s.name !== s.path
-          ? `<div class="session-name">${esc(displayName)}</div>`
-          : '';
-        const branchLine = s.branch || labelChip
-          ? `<div class="branch-row">
-               <span class="branch">${s.branch ? esc(s.branch) : ''}</span>
-               ${labelChip}
-             </div>`
-          : '';
-        const actionHint = s.awaiting_user
-          ? '<div class="action-hint">Click to clear</div>'
-          : '';
-        return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}"
-                     data-session="${s.id}">
-          <div class="agent-top">
-            <span class="status">${meta.icon} ${meta.label}</span>
-            ${typeBadge}
-          </div>
-          ${nameLine}
-          ${branchLine}
-          ${actionHint}
-        </div>`;
-      }).join('');
-
-      const titleAttr = repoPath ? ` title="${esc(repoPath)}"` : '';
+      let sessionsHtml = '';
+      if (!isCollapsed) {
+        const groups = new Map();
+        const looseCards = [];
+        for (const session of items) {
+          if (!session.group) {
+            looseCards.push(renderCard(session));
+            continue;
+          }
+          const id = session.group.id;
+          if (!groups.has(id)) groups.set(id, []);
+          groups.get(id).push(session);
+        }
+        sessionsHtml = [...groups.values()].map(renderCustomGroup).join('') + looseCards.join('');
+      }
+      const escapedPath = esc(repoPath).replace(/"/g, '&quot;');
+      const titleAttr = repoPath ? ` title="${escapedPath}"` : '';
       const chevron = isCollapsed ? '&#9656;' : '&#9662;';
 
-      return `<div class="repo-group" data-key="${esc(repoPath).replace(/"/g, '&quot;')}">
+      return `<div class="repo-group" data-key="${escapedPath}">
         <div class="repo-header"${titleAttr}>
           <span>${esc(repoName)}</span>
           <span class="chevron">${chevron}</span>
         </div>
         ${sessionsHtml}
+      </div>`;
+    }
+
+    function groupSummary(items) {
+      const running = items.filter(s => s.agent_state === 'running').length;
+      const done = items.filter(s => s.agent_state === 'awaiting_user').length;
+      const statuses = [running && `${running} running`, done && `${done} done`];
+      return statuses.filter(Boolean).join(' · ') ||
+        `${items.length} ${items.length === 1 ? 'session' : 'sessions'}`;
+    }
+
+    function renderCustomGroup(items) {
+      const group = items[0].group;
+      const collapsed = collapsedGroups.has(group.id);
+      const chevron = collapsed ? '&#9656;' : '&#9662;';
+      const name = esc(group.name).replace(/"/g, '&quot;');
+      return `<div class="custom-group" data-group="${group.id}"
+                   style="--group-color:${group.color}">
+        <div class="custom-group-header">
+          <button type="button" class="group-toggle" aria-expanded="${!collapsed}" title="${name}">
+            <span aria-hidden="true">${chevron}</span>
+            <span class="group-name">${name}</span>
+            <span class="group-summary">${groupSummary(items)}</span>
+          </button>
+          <button type="button" class="menu-trigger" aria-label="Group actions">⋯</button>
+        </div>
+        ${collapsed ? '' : items.map(renderCard).join('')}
+      </div>`;
+    }
+
+    function renderCard(s) {
+      const meta = stateMeta(s.agent_state);
+      const typeBadge = s.agent_type
+        ? `<span class="agent-type ${s.agent_type}">${s.agent_type}</span>`
+        : '';
+      const labelTitle = s.label ? esc(s.label).replace(/"/g, '&quot;') : '';
+      const labelChip = s.label
+        ? `<span class="label" title="${labelTitle}">${esc(s.label)}</span>`
+        : '';
+      const displayName = (s.name || '')
+        .replace(/\\s+\\|.*$/, '')
+        .replace(/\\s+—\\s+[~/].*$/, '')
+        .replace(/\\p{L}/u, c => c.toLowerCase());
+      const nameLine = s.name && s.name !== s.path
+        ? `<div class="session-name">${esc(displayName)}</div>`
+        : '';
+      const branchLine = s.branch || labelChip
+        ? `<div class="branch-row">
+             <span class="branch">${s.branch ? esc(s.branch) : ''}</span>
+             ${labelChip}
+           </div>`
+        : '';
+      const actionHint = s.awaiting_user
+        ? '<div class="action-hint">Click to clear</div>'
+        : '';
+      return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}"
+                   data-session="${s.id}">
+        <div class="agent-top">
+          <span class="status">${meta.icon} ${meta.label}</span>
+          <span class="card-actions">
+            ${typeBadge}
+            <span class="drag-handle" draggable="true" title="Drag to move session"
+                  aria-hidden="true">⠿</span>
+            <button type="button" class="menu-trigger" aria-label="Session actions">⋯</button>
+          </span>
+        </div>
+        ${nameLine}
+        ${branchLine}
+        ${actionHint}
       </div>`;
     }
 
@@ -978,10 +1270,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         if (eventsSource !== es || !panelWindowId || data.window_id !== panelWindowId) return;
         const ids = new Set(data.focused || []);
         if (allSessions.every(s => !!s.focused === ids.has(s.id))) return;
+        const currentLayout = renderKey(filteredSessions()) === lastRenderedInput;
         allSessions.forEach(s => { s.focused = ids.has(s.id); });
         document.querySelectorAll('.agent').forEach(el =>
           el.classList.toggle('current', ids.has(el.dataset.session)));
-        markRendered();
+        if (currentLayout) markRendered();
         renderSessions(filteredSessions());
       });
       es.addEventListener('focus-search', () => {
@@ -1001,7 +1294,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         if (eventsSource !== es) return;
         es.socket.send(JSON.stringify({
           event: 'panel-health', visible: !document.hidden,
-          busy: !!(pointerDown || labelEditorOpen || ctxMenu ||
+          busy: !!(pointerDown || labelEditorOpen || ctxMenu || dragSession ||
             document.getElementById('search').value),
           data_age_ms: lastSuccessfulPollAt ? Date.now() - lastSuccessfulPollAt : null,
         }));

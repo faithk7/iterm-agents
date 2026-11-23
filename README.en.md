@@ -26,9 +26,9 @@ and which just finished, then click through to that pane.
 
 - **Multiple windows** — an Agents panel in every iTerm2 window.
 - **Live status** — `running` (working), `done` (just finished), or `idle`.
-- **Repo grouping** — worktrees share their main repo's group; collapse one or all.
+- **Repo grouping** — worktrees share their main repo's section. Create named, colored groups inside it.
 - **Click to jump** — focus a session's terminal pane.
-- **Search** — find sessions by name, repo, branch, or agent.
+- **Search** — find sessions by name, repo, group, branch, or agent.
 
 Everything stays on your Mac. The monitor reads local processes, git
 repositories, and the visible text of your iTerm2 sessions; it serves the panel
@@ -235,6 +235,12 @@ uses uv.
   the session clears its done mark.
 - Right-click a session to add a label or mark it read. Labels disappear when
   the session or monitor exits.
+- Choose **Add to group…** from a session's menu to create or join a group in
+  its repo. Drag the grip to another group in that repo, or to the repo header
+  to ungroup the session. Click a group name to collapse it and use its **⋯**
+  menu to rename, recolor, or ungroup it.
+- Groups are shared by open panels while the monitor runs. A group disappears
+  when its last member leaves.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.
 
 With the panel focused, use `↑` / `↓` to select a session, `Enter` to jump to
@@ -251,8 +257,8 @@ uv run iterm-agents --reload-panel
 
 For installer users, use
 `"$HOME/.local/share/iterm-agents/venv/bin/iterm-agents" --reload-panel`.
-This resets panel searches and collapsed groups, while keeping the monitor's
-labels and completion marks. The monitor must have started with this version
+This resets panel searches and collapse state, while keeping the monitor's
+groups, labels, and completion marks. The monitor must have started with this version
 for the recovery command to discover its address.
 
 Requests have an eight-second deadline and failed refreshes retry with backoff.
