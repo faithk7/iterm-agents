@@ -108,14 +108,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     gap: 3px;
     color: var(--group-color);
   }
-  .group-toggle, .menu-trigger {
+  .group-toggle {
     border: 0;
     background: transparent;
     color: inherit;
     font: inherit;
-    cursor: pointer;
-  }
-  .group-toggle {
     display: flex;
     flex: 1;
     align-items: center;
@@ -140,14 +137,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     font-weight: 400;
     white-space: nowrap;
   }
-  .menu-trigger, .drag-handle {
-    color: #aaa;
-    padding: 0 3px;
-    line-height: 1.35;
-  }
-  .menu-trigger:hover, .drag-handle:hover { color: #fff; }
-  .custom-group-header, .drag-handle { cursor: grab; -webkit-user-drag: element; }
-  .card-actions { display: flex; align-items: center; gap: 3px; }
+  .custom-group-header { cursor: grab; -webkit-user-drag: element; }
   .drop-target { outline: 1px solid #569cd6; outline-offset: 1px; }
   .drop-before { box-shadow: 0 -2px #569cd6; }
   .drop-after { box-shadow: 0 2px #569cd6; }
@@ -463,7 +453,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const items = getAgentElements();
       const search = document.getElementById('search');
 
-      if (e.key === 'ArrowDown') {
+      if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+        const target = e.target?.closest?.('.custom-group-header') || items[focusedIndex];
+        if (!target) return;
+        e.preventDefault();
+        const {left, bottom} = target.getBoundingClientRect();
+        openActions(target, left, bottom);
+      } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         if (items.length === 0) return;
         focusedIndex = Math.min(focusedIndex + 1, items.length - 1);
@@ -523,7 +519,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       setTimeout(() => { if (pointerSeq === seq) pointerDown = false; }, 1000);
       const card = e.target.closest && e.target.closest('.agent');
       cardPress = card && !ctxMenu && !labelEditorOpen && e.button === 0 &&
-        !e.target.closest('.drag-handle, .menu-trigger, .label-editor') &&
+        !e.target.closest('.label-editor') &&
         (!e.pointerType || e.pointerType === 'mouse')
         ? {session: card.dataset.session, x: e.clientX, y: e.clientY, activated: false}
         : null;
@@ -538,7 +534,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       // Activate on release before an iTerm window switch can swallow the click.
       const card = e.target.closest?.('.agent');
       if (e.button === 0 && matchesCardPress(e, card) &&
-          !e.target.closest('.drag-handle, .menu-trigger, .label-editor')) {
+          !e.target.closest('.label-editor')) {
         cardPress.activated = true;
         focusSession(cardPress.session);
       }
@@ -566,14 +562,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     const sessionsPanel = document.getElementById('sessions');
 
     sessionsPanel.addEventListener('click', (e) => {
-      const menuButton = e.target.closest('.menu-trigger');
-      if (menuButton) {
-        const {left, bottom} = menuButton.getBoundingClientRect();
-        const group = menuButton.closest('.custom-group-header');
-        if (group) openGroupMenu(group, left, bottom);
-        else openCtxMenu(menuButton.closest('.agent').dataset.session, left, bottom);
-        return;
-      }
       const groupToggle = e.target.closest('.group-toggle');
       if (groupToggle) {
         const id = groupToggle.closest('.custom-group').dataset.group;
@@ -585,7 +573,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         }
         return;
       }
-      if (e.target.closest('.drag-handle')) return;
       const header = e.target.closest('.repo-header');
       if (header) {
         toggleGroup(header.parentElement.dataset.key);
@@ -610,23 +597,21 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       }
     });
 
-    // Right-click a card for its action menu. The menu and the label editor
-    // both live outside the polling render's reach until dismissed.
+    // Keep polling from replacing cards while a menu or editor is open.
     let ctxMenu = null;
     let labelEditorOpen = false;
 
     sessionsPanel.addEventListener('contextmenu', (e) => {
-      const group = e.target.closest('.custom-group-header');
-      if (group) {
-        e.preventDefault();
-        openGroupMenu(group, e.clientX, e.clientY);
-        return;
-      }
-      const card = e.target.closest('.agent');
-      if (!card) return;
+      const target = e.target.closest('.custom-group-header, .agent');
+      if (!target) return;
       e.preventDefault();
-      openCtxMenu(card.dataset.session, e.clientX, e.clientY);
+      openActions(target, e.clientX, e.clientY);
     });
+
+    function openActions(target, x, y) {
+      if (target.classList.contains('agent')) openCtxMenu(target.dataset.session, x, y);
+      else openGroupMenu(target, x, y);
+    }
 
     sessionsPanel.addEventListener('dragstart', (e) => {
       const source = e.target.closest('.custom-group-header, .agent');
@@ -1236,9 +1221,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
             <span class="group-name">${name}</span>
             <span class="group-summary">${groupSummary(items)}</span>
           </button>
-          <span class="drag-handle" draggable="true" title="Drag to reorder group"
-                aria-hidden="true">⠿</span>
-          <button type="button" class="menu-trigger" aria-label="Group actions">⋯</button>
         </div>
         ${collapsed ? '' : items.map(renderCard).join('')}
       </div>`;
@@ -1273,12 +1255,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
                    data-session="${s.id}" draggable="true">
         <div class="agent-top">
           <span class="status">${meta.icon} ${meta.label}</span>
-          <span class="card-actions">
-            ${typeBadge}
-            <span class="drag-handle" draggable="true" title="Drag to move session"
-                  aria-hidden="true">⠿</span>
-            <button type="button" class="menu-trigger" aria-label="Session actions">⋯</button>
-          </span>
+          ${typeBadge}
         </div>
         ${nameLine}
         ${branchLine}

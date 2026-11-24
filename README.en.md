@@ -236,21 +236,22 @@ uses uv.
 - Right-click a session to add a label or mark it read. Labels disappear when
   the session or monitor exits.
 - Drag a session card or group header to reorder it within its repo or group.
-  You can also use **Move up** and **Move down** in its **⋯** menu.
+  You can also right-click it and choose **Move up** or **Move down**.
 - Choose **Add to group…** from a session's menu or drop its card onto a group's
   center to join it. Drop a loose card near the top or bottom of a group header
   to place it beside the group. Drop a grouped card onto the repo header to
   ungroup it.
 - A new group starts at its session card's position. Click its name to collapse
-  it, or use its **⋯** menu to rename, recolor, or ungroup it.
+  it. Right-click the group header to rename, recolor, or ungroup it.
 - **Close group…** closes the group's terminal sessions after you confirm.
   Choose **Ungroup sessions** to dissolve the group and keep the sessions open.
 - Groups and custom order are shared by open panels while the monitor runs.
   A group disappears when its last member leaves.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.
 
-With the panel focused, use `↑` / `↓` to select a session, `Enter` to jump to
-its pane, and `Escape` to close a menu or return to search.
+With the panel focused, use `↑` / `↓` to select a session and `Enter` to jump
+to its pane. `Shift+F10` opens the action menu for the selected session or
+focused group header. `Escape` closes a menu or returns to search.
 
 ## Troubleshooting
 

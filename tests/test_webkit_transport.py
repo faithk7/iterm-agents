@@ -111,14 +111,18 @@ const groupOf = id => card(id)?.closest('.custom-group');
 const nameOf = group => group?.querySelector('.group-name').textContent;
 const choose = label => [...document.querySelectorAll('.ctx-item')]
   .find(item => item.textContent === label).click();
-const groupMenu = group => group.querySelector('.menu-trigger').click();
+const rightClick = target => target.dispatchEvent(new MouseEvent('contextmenu',
+  {bubbles: true, cancelable: true, button: 2}));
+const groupMenu = group => rightClick(group.querySelector('.custom-group-header'));
+const key = (target, key, shiftKey = false) => target.dispatchEvent(new KeyboardEvent('keydown',
+  {bubbles: true, cancelable: true, key, shiftKey}));
 function enterName(name) {
   const input = document.querySelector('.label-editor input');
   input.value = name;
   input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
 }
 function createGroup(id, name) {
-  card(id).dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}));
+  rightClick(card(id));
   choose('Add to group…');
   choose('New group…');
   enterName(name);
@@ -133,6 +137,11 @@ async function waitFor(condition, message) {
 }
 (async () => {
   await waitFor(() => card(4), 'initial cards');
+  key(document.getElementById('search'), 'ArrowDown');
+  key(document.activeElement, 'F10', true);
+  check(document.querySelector('.ctx-item')?.textContent === 'Add to group…',
+    'Shift+F10 opens the selected session menu');
+  key(document.activeElement, 'Escape');
   let dataTransfer;
   function startDrag(target) {
     target.dispatchEvent(new PointerEvent('pointerdown',
@@ -160,6 +169,7 @@ async function waitFor(condition, message) {
 
   createGroup(2, 'Placement');
   await waitFor(() => groupOf(2), 'create group in middle');
+  check(!document.querySelector('.drag-handle, .menu-trigger'), 'no grip or menu buttons');
   check(card(1).nextElementSibling === groupOf(2) && groupOf(2).nextElementSibling === card(3),
     'a new group takes its card’s position');
   startDrag(card(3));
@@ -167,10 +177,10 @@ async function waitFor(condition, message) {
   check(drag(placementHeader, 'drop', placementHeader.getBoundingClientRect().top + 1),
     'drop a loose session before a group');
   await waitFor(() => card(3).nextElementSibling === groupOf(2), 'reorder beside a group');
-  card(3).querySelector('.menu-trigger').click();
+  rightClick(card(3));
   choose('Move down');
   await waitFor(() => groupOf(2).nextElementSibling === card(3), 'restore position below the group');
-  groupMenu(groupOf(2));
+  key(groupOf(2).querySelector('.group-toggle'), 'F10', true);
   choose('Move down');
   await waitFor(() => card(3).nextElementSibling === groupOf(2), 'move down past a loose card');
   groupMenu(groupOf(2));
@@ -195,7 +205,7 @@ async function waitFor(condition, message) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({action: 'move', session: 's-4', group: first})});
   check(rejected.status === 409, 'reject moves across repos');
-  card(2).querySelector('.menu-trigger').click();
+  rightClick(card(2));
   choose('Add to group…');
   choose('Release <review>');
   await waitFor(() => groupOf(2)?.dataset.group === first, 'join via worktree');
@@ -203,7 +213,7 @@ async function waitFor(condition, message) {
   check(drag(card(1), 'drop', card(1).getBoundingClientRect().top + 1),
     'drop session before a sibling in its group');
   await waitFor(() => card(2).nextElementSibling === card(1), 'reorder sessions within a group');
-  card(2).querySelector('.menu-trigger').click();
+  rightClick(card(2));
   choose('Move down');
   await waitFor(() => card(1).nextElementSibling === card(2), 'reorder sessions using the menu');
 
@@ -268,7 +278,7 @@ async function waitFor(condition, message) {
       target: 'group:' + groupOf(4).dataset.group, before: true})});
   check(crossRepo.status === 409, 'reject group reordering across repos');
 
-  startDrag(card(1).querySelector('.drag-handle'));
+  startDrag(card(1));
   check(!drag(card(4).closest('.repo-group').querySelector('.repo-header'), 'dragover'),
     'foreign repo is not a drop target');
   check(drag(groupOf(3), 'dragover') && drag(groupOf(3), 'drop'), 'drop in same repo');
@@ -278,7 +288,7 @@ async function waitFor(condition, message) {
   check((await (await fetch('/api/sessions?cached=1')).json())[0].group.name === 'Fixes',
     'group membership is shared by fresh panels');
 
-  card(1).querySelector('.menu-trigger').click();
+  rightClick(card(1));
   choose('Remove from group');
   await waitFor(() => card(1) && !groupOf(1), 'remove member');
   groupMenu(groupOf(3));
