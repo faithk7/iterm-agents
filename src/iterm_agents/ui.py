@@ -97,9 +97,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   .repo-header:hover .chevron { color: #d4d4d4; }
   .custom-group {
-    margin: 5px 0 5px 5px;
-    padding-left: 6px;
-    border-left: 2px solid var(--group-color);
+    margin: 5px 0 5px 2px;
+    padding-left: 2px;
+    border-left: 1px solid var(--group-color);
   }
   .custom-group-header {
     position: relative;
