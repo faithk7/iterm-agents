@@ -167,7 +167,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     border-radius: 2px;
     background: #569cd6;
   }
-  .agent.running { border-left-color: #d7ba7d; }
+  .agent.running { border-left-color: #d7ba7d; background: #332d1a; }
+  .agent.running:hover, .agent.running.focused { background: #40381f; }
   /* A highlight sweeps down the running card's left bar. */
   .agent.running::after {
     content: '';
@@ -184,7 +185,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   /* Two peaks per 200% tile: one highlight is always on the bar, wrapping top to bottom. */
   @keyframes bar-shine { from { background-position: 0 100%; } to { background-position: 0 0; } }
-  @media (prefers-reduced-motion: reduce) { .agent.running::after { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .agent.running::after, .running .status { animation: none; } }
   .agent.awaiting-user { border-left-color: #4ec9b0; background: #1c332a; }
   .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: #22402f; }
   .agent.idle { border-left-color: #555; }
@@ -195,7 +196,16 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     justify-content: space-between;
   }
   .status { font-weight: bold; font-size: 11px; }
-  .running .status { color: #d7ba7d; }
+  .running .status {
+    color: #d7ba7d;
+    background: linear-gradient(to right, #c8a24a 0%, #fff0a8 25%, #c8a24a 50%, #fff0a8 75%, #c8a24a 100%) 0 0 / 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: text-shine 1.6s linear infinite;
+    animation-delay: var(--shine-delay, 0s);
+  }
+  @keyframes text-shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
   .awaiting-user .status { color: #4ec9b0; }
   .idle .status { color: #808080; }
   .agent-type {
