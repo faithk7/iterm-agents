@@ -107,10 +107,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     align-items: center;
     gap: 3px;
     margin-bottom: 3px;
-    padding: 0 4px;
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--group-color) 28%, transparent);
-    color: #dcdcaa;
+    padding: 0 6px;
+    border-radius: 6px;
+    background: var(--group-color);
+    color: #1e1e1e;
   }
   .group-toggle {
     border: 0;
@@ -136,7 +136,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   .group-summary {
     margin-left: auto;
-    color: #aaa;
+    opacity: 0.7;
     font-size: 10px;
     font-weight: 400;
     white-space: nowrap;
@@ -288,6 +288,13 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     overflow-wrap: anywhere;
   }
   .ctx-item:hover, .ctx-item:focus-visible { background: #094771; }
+  .ctx-item[data-icon]::before, .ctx-menu:has([data-icon]) .ctx-item:not([data-icon])::before {
+    content: attr(data-icon);
+    display: inline-block;
+    width: 16px;
+    color: #9da5b4;
+  }
+  .ctx-item:hover::before, .ctx-item:focus-visible::before { color: #fff; }
   .ctx-message {
     max-width: 215px;
     padding: 6px 12px;
@@ -907,6 +914,14 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       openMenu(items, x, y);
     }
 
+    // Leading glyph per action, drawn from data-icon so the label text stays plain.
+    const menuIcons = [
+      [/^Cancel/, '↩'], [/^Close/, '✕'], [/^Add .*group/, '⊕'], [/^New group/, '+'],
+      [/^(Label|Rename)/, '✎'], [/^Focus/, '◎'], [/^Remove from group/, '⊖'],
+      [/^Ungroup/, '⊘'], [/^Mark as read/, '✓'], [/^Move up/, '↑'], [/^Move down/, '↓'],
+      [/^Change color/, '◐'], [/^Clear selection/, '↺'],
+    ];
+
     function openMenu(items, x, y, message = '') {
       closeCtxMenu();
       closeLabelEditor();
@@ -925,6 +940,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         item.type = 'button';
         item.className = 'ctx-item';
         item.textContent = label;
+        const icon = menuIcons.find(([re]) => re.test(label))?.[1];
+        if (icon) item.dataset.icon = icon;
         item.addEventListener('click', (e) => {
           e.stopPropagation();
           closeCtxMenu();
@@ -1332,9 +1349,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
                    style="--group-color:${group.color}">
         <div class="custom-group-header" draggable="true">
           <button type="button" class="group-toggle" aria-expanded="${!collapsed}" title="${name}">
-            <span aria-hidden="true">${chevron}</span>
             <span class="group-name">${name}</span>
             <span class="group-summary">${groupSummary(items)}</span>
+            <span aria-hidden="true">${chevron}</span>
           </button>
         </div>
         ${collapsed ? '' : items.map(renderCard).join('')}
