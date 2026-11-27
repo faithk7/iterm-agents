@@ -50,7 +50,7 @@ function makePanel(savedName = '', probeRule = true) {
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, {
         value: '', innerHTML: '', focus() {}, select() {}, addEventListener() {},
-        style: {}, offsetWidth: 50,
+        style: {setProperty() {}}, offsetWidth: 50,
         get clientWidth() { probeReads++; return ownerKey ? 49 : 48; },
       });
       return elements.get(id);
@@ -354,7 +354,7 @@ function addListener(registry, key, name, fn) {
 }
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
-    value: '', textContent: '', disabled: false,
+    value: '', textContent: '', disabled: false, style: {setProperty() {}},
     focus() {},
     addEventListener(name, fn) { addListener(elementListeners, id, name, fn); },
     set innerHTML(html) {

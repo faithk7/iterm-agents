@@ -179,6 +179,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     border-radius: 4px 0 0 4px;
     background: linear-gradient(to bottom, #b8860b 0%, #ffe680 25%, #b8860b 50%, #ffe680 75%, #b8860b 100%) 0 0 / 100% 200%;
     animation: bar-shine 1.6s linear infinite;
+    animation-delay: var(--shine-delay, 0s);
     pointer-events: none;
   }
   /* Two peaks per 200% tile: one highlight is always on the bar, wrapping top to bottom. */
@@ -1230,6 +1231,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           const html = sessions.length ? buildHtml(sessions)
             : '<div class="no-results">No sessions found</div>';
           if (html !== lastRenderedHtml) {
+            // A swap recreates the cards and restarts their animations; a
+            // wall-clock delay keeps the shine in phase instead of jumping.
+            sessionsPanel.style.setProperty('--shine-delay', `${-(Date.now() % 1600)}ms`);
             sessionsPanel.innerHTML = html;
             lastRenderedHtml = html;
           }
