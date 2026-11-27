@@ -287,7 +287,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .action-hint { color: #4ec9b0; font-size: 10px; margin-top: 3px; }
   .count {
     font-size: 11px;
     color: #808080;
@@ -983,8 +982,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       card.classList.add('idle');
       const status = card.querySelector('.status');
       if (status) status.innerHTML = '&#9675; idle';
-      const hint = card.querySelector('.action-hint');
-      if (hint) hint.remove();
     }
 
     function acknowledgeCard(sessionId) {
@@ -1327,9 +1324,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
              ${labelChip}
            </div>`
         : '';
-      const actionHint = s.awaiting_user
-        ? '<div class="action-hint">Click to clear</div>'
-        : '';
       return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}${selectedSessions.has(s.id) ? ' selected' : ''}"
                    data-session="${s.id}" draggable="true">
         <div class="agent-top">
@@ -1338,7 +1332,6 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         </div>
         ${nameLine}
         ${branchLine}
-        ${actionHint}
       </div>`;
     }
 

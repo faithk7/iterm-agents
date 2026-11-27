@@ -445,7 +445,6 @@ element('search').value = 'visible';
 vm.runInContext('filterSessions()', context);
 const classes = new Set(['awaiting-user']);
 const status = {};
-let hintRemoved = false;
 cards = [{
   dataset: { session: 'one' },
   classList: {
@@ -453,8 +452,7 @@ cards = [{
     toggle(c, enabled) { if (enabled) classes.add(c); else classes.delete(c); },
     add: c => classes.add(c), remove: c => classes.delete(c),
   },
-  querySelector: selector => selector === '.status'
-    ? status : { remove() { hintRemoved = true; } },
+  querySelector: selector => selector === '.status' ? status : null,
   getBoundingClientRect: () => ({
     top: cardPositions.one - viewport.scrollY,
     bottom: cardPositions.one - viewport.scrollY + 60,
@@ -491,7 +489,6 @@ assert.equal(writes, initialWrites, 'clearing done must preserve the card');
 assert.equal(cards[0], originalCard);
 assert.ok(classes.has('idle'));
 assert.ok(!classes.has('awaiting-user'));
-assert.ok(hintRemoved);
 assert.equal(status.innerHTML, '&#9675; idle');
 assert.ok(!element('sessions').innerHTML.includes('data-session="two"'));
 assert.ok(element('count').textContent.includes('0 done'));
