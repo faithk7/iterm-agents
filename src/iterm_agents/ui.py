@@ -147,6 +147,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .drop-after { box-shadow: 0 2px #569cd6; }
   .agent {
     position: relative;
+    min-height: 39px;
     padding: 5px 8px;
     margin: 3px 0;
     border-radius: 4px;
@@ -168,7 +169,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     top: 4px;
     bottom: 4px;
     width: 3px;
-    border-radius: 2px;
+    border-radius: 50% / 3px;
     background: #8b5cf6;
   }
   .agent.running { border-left-color: #d7ba7d; background: linear-gradient(to bottom, #3a321a, #2d2d2d); }
