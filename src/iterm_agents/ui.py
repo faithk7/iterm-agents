@@ -169,7 +169,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     bottom: 4px;
     width: 3px;
     border-radius: 2px;
-    background: #569cd6;
+    background: #8b5cf6;
   }
   .agent.running { border-left-color: #d7ba7d; background: linear-gradient(to bottom, #3a321a, #2d2d2d); }
   .agent.running:hover, .agent.running.focused { background: linear-gradient(to bottom, #473d1f, #383838); }
