@@ -168,6 +168,22 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     background: #569cd6;
   }
   .agent.running { border-left-color: #d7ba7d; }
+  /* A highlight sweeps down the running card's left bar. */
+  .agent.running::after {
+    content: '';
+    position: absolute;
+    left: -3px;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    border-radius: 4px 0 0 4px;
+    background: linear-gradient(to bottom, #b8860b 0%, #ffe680 25%, #b8860b 50%, #ffe680 75%, #b8860b 100%) 0 0 / 100% 200%;
+    animation: bar-shine 1.6s linear infinite;
+    pointer-events: none;
+  }
+  /* Two peaks per 200% tile: one highlight is always on the bar, wrapping top to bottom. */
+  @keyframes bar-shine { from { background-position: 0 100%; } to { background-position: 0 0; } }
+  @media (prefers-reduced-motion: reduce) { .agent.running::after { animation: none; } }
   .agent.awaiting-user { border-left-color: #4ec9b0; background: #1c332a; }
   .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: #22402f; }
   .agent.idle { border-left-color: #555; }
