@@ -210,6 +210,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   @keyframes text-shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
   .awaiting-user .status { color: #6fd3bf; }
+  .done-mark { width: 12px; height: 12px; vertical-align: middle; }
   /* One-time flash when a session finishes. */
   .agent.just-done { animation: done-glow 0.6s ease-out var(--flash-delay, 0s); }
   .just-done .status { animation: done-text 0.6s ease-out var(--flash-delay, 0s); }
@@ -1404,7 +1405,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         case 'running':
           return { cls: 'running', icon: '&#9679;', label: 'running' };
         case 'awaiting_user':
-          return { cls: 'awaiting-user', icon: '&#10003;', label: 'done' };
+          return { cls: 'awaiting-user', icon: '<svg class="done-mark" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="5.2" stroke-width="1"/><path d="M3.3 6.3l1.9 1.9 3.5-4" stroke-width="1.5"/></svg>', label: 'done' };
         case 'idle':
           return { cls: 'idle', icon: '&#9675;', label: 'idle' };
         default:
