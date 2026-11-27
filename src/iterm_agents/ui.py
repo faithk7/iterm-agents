@@ -106,7 +106,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     display: flex;
     align-items: center;
     gap: 3px;
-    color: var(--group-color);
+    margin-bottom: 3px;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--group-color) 28%, transparent);
+    color: #dcdcaa;
   }
   .group-toggle {
     border: 0;
