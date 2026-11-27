@@ -137,7 +137,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     font-weight: 400;
     white-space: nowrap;
   }
-  .custom-group-header { cursor: grab; -webkit-user-drag: element; }
+  .custom-group-header { cursor: pointer; -webkit-user-drag: element; }
   .drop-target { outline: 1px solid #569cd6; outline-offset: 1px; }
   .drop-before { box-shadow: 0 -2px #569cd6; }
   .drop-after { box-shadow: 0 2px #569cd6; }
@@ -148,7 +148,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     border-radius: 4px;
     background: #2d2d2d;
     border-left: 3px solid #808080;
-    cursor: grab;
+    cursor: pointer;
     -webkit-user-drag: element;
     transition: background 0.15s;
     outline: none;
@@ -171,6 +171,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   .agent.awaiting-user { border-left-color: #4ec9b0; background: #1c332a; }
   .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: #22402f; }
   .agent.idle { border-left-color: #555; }
+  .agent.selected, .agent.selected:hover { background: #094771; }
   .agent-top {
     display: flex;
     align-items: center;
@@ -479,6 +480,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         e.preventDefault();
         items[focusedIndex].click();
       } else if (e.key === 'Escape') {
+        clearSelection();
         focusedIndex = -1;
         clearFocus(items);
         search.focus();
@@ -519,7 +521,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       setTimeout(() => { if (pointerSeq === seq) pointerDown = false; }, 1000);
       const card = e.target.closest && e.target.closest('.agent');
       cardPress = card && !ctxMenu && !labelEditorOpen && e.button === 0 &&
-        !e.target.closest('.label-editor') &&
+        !isSelectClick(e) && !e.target.closest('.label-editor') &&
         (!e.pointerType || e.pointerType === 'mouse')
         ? {session: card.dataset.session, x: e.clientX, y: e.clientY, activated: false}
         : null;
@@ -579,7 +581,12 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         return;
       }
       const card = e.target.closest('.agent');
+      if (card && isSelectClick(e)) {
+        selectCard(card);
+        return;
+      }
       if (card) {
+        clearSelection();
         const clickedSessionId = card.dataset.session;
         const keyboardClick = e.detail === 0;
         const alreadyActivated = !keyboardClick && cardPress?.activated &&
@@ -597,6 +604,22 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       }
     });
 
+    // Selected session IDs; persists across re-renders like the collapsed sets.
+    const selectedSessions = new Set();
+    const isSelectClick = e => e.metaKey || e.ctrlKey || e.shiftKey;
+
+    function selectCard(card) {
+      const id = card.dataset.session;
+      if (!selectedSessions.delete(id)) selectedSessions.add(id);
+      filterSessions(true);
+    }
+
+    function clearSelection() {
+      if (!selectedSessions.size) return;
+      selectedSessions.clear();
+      filterSessions(true);
+    }
+
     // Keep polling from replacing cards while a menu or editor is open.
     let ctxMenu = null;
     let labelEditorOpen = false;
@@ -605,7 +628,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const target = e.target.closest('.custom-group-header, .agent');
       if (!target) return;
       e.preventDefault();
-      openActions(target, e.clientX, e.clientY);
+      if (selectedSessions.size > 1 && selectedSessions.has(target.dataset.session)) {
+        openSelectionMenu(e.clientX, e.clientY);
+      } else {
+        openActions(target, e.clientX, e.clientY);
+      }
     });
 
     function openActions(target, x, y) {
@@ -757,20 +784,48 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     }
 
     function openGroupPicker(session, x, y) {
-      if (!session) return;
-      const groups = itemsInRepo(session.root_repo || '')
+      if (session) pickGroup([session], x, y);
+    }
+
+    function pickGroup(sessions, x, y) {
+      const ids = sessions.map(s => s.id);
+      const groups = itemsInRepo(sessions[0].root_repo || '')
         .map(([, rows]) => rows[0].group).filter(Boolean);
       const items = [['New group…', () => openTextEditor(
-        sessionCard(session.id), '', 'Group name', name => {
-          if (name) editGroup({action: 'create', session: session.id, name,
+        sessionCard(ids[0]), '', 'Group name', name => {
+          if (name) editGroup({action: 'create', sessions: ids, name,
             color: groupColors[groups.length % groupColors.length][1]});
         })]];
       for (const group of groups) {
-        if (group.id !== session.group?.id)
+        if (sessions.some(s => s.group?.id !== group.id))
           items.push([group.name, () => editGroup({
-            action: 'move', session: session.id, group: group.id,
+            action: 'move', sessions: ids, group: group.id,
           })]);
       }
+      openMenu(items, x, y);
+    }
+
+    function openSelectionMenu(x, y) {
+      const sessions = allSessions.filter(s => selectedSessions.has(s.id));
+      if (!sessions.length) return;
+      const ids = sessions.map(s => s.id);
+      const count = `${ids.length} ${ids.length === 1 ? 'session' : 'sessions'}`;
+      const items = [];
+      // Groups are repo-scoped, so grouping only applies to one repo's sessions.
+      if (new Set(sessions.map(s => s.root_repo || '')).size === 1)
+        items.push([`Add ${count} to group…`, () => pickGroup(sessions, x, y)]);
+      if (sessions.some(s => s.group))
+        items.push(['Remove from group', () => editGroup({action: 'move', sessions: ids})]);
+      if (!closingGroup) {
+        items.push([`Close ${count}…`, () => openMenu([
+          ['Cancel', () => {}],
+          [`Close ${count}`, () => {
+            selectedSessions.clear();
+            editGroup({action: 'close', sessions: ids});
+          }],
+        ], x, y, `Close ${count}? Running commands may stop.`)]);
+      }
+      items.push(['Clear selection', clearSelection]);
       openMenu(items, x, y);
     }
 
@@ -860,7 +915,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       } catch (error) {
         if (closing) {
           status.textContent = error.status === 409
-            ? 'Group changed or is closing. Check its sessions and try again.'
+            ? `${change.group ? 'Group' : 'Selection'} changed or is closing. Check its sessions and try again.`
             : 'Could not confirm the close result. Check which sessions are still open.';
         } else {
           status.textContent = change.action === 'reorder'
@@ -1037,6 +1092,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           connectEvents();
         }
         allSessions = sessions;
+        for (const id of selectedSessions) {
+          if (!sessions.some(row => row.id === id)) selectedSessions.delete(id);
+        }
         filterSessions(force);
         hasSessionSnapshot = true;
         sessionFailures = 0;
@@ -1097,7 +1155,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     let pendingFocusReveal = '';
 
     function renderKey(sessions) {
-      return JSON.stringify([sessions, [...collapsedRepos].sort(), [...collapsedGroups].sort()]);
+      return JSON.stringify([sessions, [...collapsedRepos].sort(), [...collapsedGroups].sort(),
+        [...selectedSessions].sort()]);
     }
 
     function buildHtml(sessions) {
@@ -1251,7 +1310,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       const actionHint = s.awaiting_user
         ? '<div class="action-hint">Click to clear</div>'
         : '';
-      return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}"
+      return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}${selectedSessions.has(s.id) ? ' selected' : ''}"
                    data-session="${s.id}" draggable="true">
         <div class="agent-top">
           <span class="status">${meta.icon} ${meta.label}</span>

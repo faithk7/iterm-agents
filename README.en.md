@@ -245,6 +245,9 @@ uses uv.
   it. Right-click the group header to rename, recolor, or ungroup it.
 - **Close group…** closes the group's terminal sessions after you confirm.
   Choose **Ungroup sessions** to dissolve the group and keep the sessions open.
+- `Cmd`-, `Ctrl`-, or `Shift`-click cards to select several, and `Esc`
+  to clear. Right-click a selected card to add the selection to a group (same repo only),
+  remove it from groups, or close it after you confirm.
 - Groups and custom order are shared by open panels while the monitor runs.
   A group disappears when its last member leaves.
 - `Cmd+Shift+M` opens the toolbelt in the current window and focuses search.

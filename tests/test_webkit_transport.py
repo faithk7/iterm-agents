@@ -316,6 +316,25 @@ async function waitFor(condition, message) {
   await waitFor(() => !card(2), 'closed session disappears');
   check(groupOf(3) && card(4), 'declined and unrelated sessions stay open');
 
+  const cmdClick = id => card(id).dispatchEvent(new MouseEvent('click',
+    {bubbles: true, cancelable: true, metaKey: true}));
+  cmdClick(1);
+  cmdClick(3);
+  check(card(1).classList.contains('selected') && card(3).classList.contains('selected'),
+    'cmd-click selects cards');
+  rightClick(card(3));
+  choose('Add 2 sessions to group…');
+  choose('New group…');
+  enterName('Bulk');
+  await waitFor(() => groupOf(1) && groupOf(1) === groupOf(3) && nameOf(groupOf(1)) === 'Bulk',
+    'bulk add to a new group');
+  check(card(1).classList.contains('selected'), 'selection survives regrouping');
+  rightClick(card(1));
+  check(document.querySelector('.ctx-item').textContent.startsWith('Add 2 sessions'),
+    'selected card opens the bulk menu');
+  choose('Clear selection');
+  check(!document.querySelector('.agent.selected'), 'clear selection');
+
   card(1).click();
   await new Promise(resolve => setTimeout(resolve, 50));
   window.webkit.messageHandlers.result.postMessage('DONE groups worked');

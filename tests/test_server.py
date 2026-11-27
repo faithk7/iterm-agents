@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import iterm2.api_pb2
+import iterm2.rpc
 import pytest
 
 from iterm_agents.detector import AgentType, GitInfo, ProcessInfo, detect_agents
@@ -613,6 +615,46 @@ class TestAgentMonitorServer:
             assert {row["id"]: row["sidebar_position"] for row in snapshot} == {
                 "first": 1, "second": 0,
             }
+        await asyncio.gather(*server._detached_tasks)
+
+    async def test_group_actions_accept_several_sessions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aiohttp import web
+
+        server = AgentMonitorServer(connection=None)  # type: ignore[arg-type]
+        server._scan_sessions = AsyncMock(return_value=[
+            {"id": "a", "root_repo": "~/project"},
+            {"id": "b", "root_repo": "~/project"},
+            {"id": "c", "root_repo": "~/other"},
+        ])
+        await server._handle_sessions(None)
+
+        async def post(**data: Any) -> web.StreamResponse:
+            return await server._handle_group(SimpleNamespace(
+                content_type="application/json",
+                json=AsyncMock(return_value=data),
+                headers={"Origin": server.url.rstrip("/")},
+            ))
+
+        created = await post(action="create", sessions=["a", "b"], name="G", color="#79b8f3")
+        assert created.status == 204
+        assert set(server._session_group_ids) == {"a", "b"}
+        assert len(set(server._session_group_ids.values())) == 1
+        with pytest.raises(web.HTTPConflict):
+            await post(action="move", sessions=["a", "c"])
+        assert (await post(action="move", sessions=["a", "b"])).status == 204
+        assert server._session_group_ids == {}
+
+        close = AsyncMock(return_value=SimpleNamespace(
+            close_response=SimpleNamespace(statuses=[iterm2.api_pb2.CloseResponse.OK] * 2)
+        ))
+        monkeypatch.setattr(iterm2.rpc, "async_close", close)
+        with pytest.raises(web.HTTPConflict):
+            await post(action="close", sessions=["a", "gone"])
+        response = await post(action="close", sessions=["a", "c"])
+        assert json.loads(response.text) == {"closed": 2, "total": 2}
+        assert close.await_args.kwargs["sessions"] == ["a", "c"]
         await asyncio.gather(*server._detached_tasks)
 
     async def test_initial_failed_scan_reports_unavailable(

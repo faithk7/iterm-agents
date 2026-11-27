@@ -1133,11 +1133,16 @@ class AgentMonitorServer:
             or not all(isinstance(session, str) for session in confirmed)
         ):
             raise web.HTTPBadRequest(text="Expected confirmed session IDs")
-        members = [
-            row["id"]
-            for row in self._scan_cache[1]
-            if (group := self._group_for_row(row)) is not None and group["id"] == group_id
-        ]
+        if group_id:
+            members = [
+                row["id"]
+                for row in self._scan_cache[1]
+                if (group := self._group_for_row(row)) is not None and group["id"] == group_id
+            ]
+        else:
+            members = list(dict.fromkeys(confirmed))
+            if not set(members) <= {row["id"] for row in self._scan_cache[1]}:
+                raise web.HTTPConflict(text="Selected sessions changed")
         if sorted(confirmed) != sorted(members):
             raise web.HTTPConflict(text="Group membership changed")
         if self._closing_sessions.intersection(members):
@@ -1188,10 +1193,16 @@ class AgentMonitorServer:
             return await self._close_group(group_id, data.get("sessions"))
 
         if action in ("create", "move"):
-            row = next((row for row in self._scan_cache[1] if row["id"] == session_id), None)
-            if row is None:
+            ids = data.get("sessions", [session_id])
+            if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+                raise web.HTTPBadRequest(text="Expected session IDs")
+            rows = [next((r for r in self._scan_cache[1] if r["id"] == i), None) for i in ids]
+            if None in rows:
                 raise web.HTTPNotFound(text="Session is no longer available")
+            row = rows[0]
             repo = row.get("root_repo", "")
+            if any(r.get("root_repo", "") != repo for r in rows):
+                raise web.HTTPConflict(text="Sessions must share a repo")
             if action == "create":
                 group_id = uuid4().hex
                 scope = (repo, "")
@@ -1207,10 +1218,11 @@ class AgentMonitorServer:
                 }
             elif group_id and (group is None or group["root_repo"] != repo):
                 raise web.HTTPConflict(text="That group is no longer in this repo")
-            if group_id:
-                self._session_group_ids[session_id] = group_id
-            else:
-                self._session_group_ids.pop(session_id, None)
+            for moved in ids:
+                if group_id:
+                    self._session_group_ids[moved] = group_id
+                else:
+                    self._session_group_ids.pop(moved, None)
         elif action == "reorder":
             target, before = data.get("target"), data.get("before")
             if not isinstance(target, str) or not isinstance(before, bool):
