@@ -109,7 +109,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     margin-bottom: 3px;
     padding: 0 6px;
     border-radius: 6px;
-    background: var(--group-color);
+    background: color-mix(in srgb, var(--group-color) 85%, #1e1e1e);
     color: #1e1e1e;
   }
   .group-toggle {
