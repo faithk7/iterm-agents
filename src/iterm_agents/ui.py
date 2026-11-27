@@ -171,8 +171,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     border-radius: 2px;
     background: #569cd6;
   }
-  .agent.running { border-left-color: #d7ba7d; background: #332d1a; }
-  .agent.running:hover, .agent.running.focused { background: #40381f; }
+  .agent.running { border-left-color: #d7ba7d; background: linear-gradient(to bottom, #3a321a, #2d2d2d); }
+  .agent.running:hover, .agent.running.focused { background: linear-gradient(to bottom, #473d1f, #383838); }
   /* A highlight sweeps down the running card's left bar. */
   .agent.running::after {
     content: '';
@@ -189,9 +189,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
   }
   /* Two peaks per 200% tile: one highlight is always on the bar, wrapping top to bottom. */
   @keyframes bar-shine { from { background-position: 0 100%; } to { background-position: 0 0; } }
-  @media (prefers-reduced-motion: reduce) { .agent.running::after, .running .status { animation: none; } }
-  .agent.awaiting-user { border-left-color: #4ec9b0; background: #1c332a; }
-  .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: #22402f; }
+  .agent.awaiting-user { border-left-color: #4ec9b0; background: linear-gradient(to bottom, #1f3a33, #2d2d2d); }
+  .agent.awaiting-user:hover, .agent.awaiting-user.focused { background: linear-gradient(to bottom, #25463d, #383838); }
   .agent.idle { border-left-color: #555; }
   .agent.selected, .agent.selected:hover { background: #094771; }
   .agent-top {
@@ -210,7 +209,15 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
     animation-delay: var(--shine-delay, 0s);
   }
   @keyframes text-shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
-  .awaiting-user .status { color: #4ec9b0; }
+  .awaiting-user .status { color: #6fd3bf; }
+  /* One-time flash when a session finishes. */
+  .agent.just-done { animation: done-glow 0.6s ease-out var(--flash-delay, 0s); }
+  .just-done .status { animation: done-text 0.6s ease-out var(--flash-delay, 0s); }
+  @keyframes done-glow { from { box-shadow: 0 0 10px 1px #4ec9b0; } to { box-shadow: 0 0 0 0 transparent; } }
+  @keyframes done-text { from { color: #d2fff6; } to { color: #6fd3bf; } }
+  @media (prefers-reduced-motion: reduce) {
+    .agent.running::after, .running .status, .agent.just-done, .just-done .status { animation: none; }
+  }
   .idle .status { color: #808080; }
   .agent-type {
     font-size: 10px;
@@ -340,6 +347,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
 
   <script>
     let allSessions = [];
+    // Running→done transitions flash the card once. The delay keeps a re-render
+    // inside the flash window from restarting it.
+    const lastStates = new Map();
+    const finishedAt = new Map();
+    const FLASH_MS = 600;
     let focusedIndex = -1;
     // The browsing-context name survives reloads and belongs to this WebView.
     // localStorage/cookies would share ownership between different panels.
@@ -757,6 +769,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       highlightDropTarget(null);
     });
 
+    // A menu entry that asks "Cancel / <label>" before running a group change.
+    function confirmItem(label, message, run, x, y) {
+      return [`${label}…`, () => openMenu([['Cancel', () => {}], [label, run]], x, y, message)];
+    }
+
     function openCtxMenu(sessionId, x, y) {
       const session = allSessions.find(s => s.id === sessionId);
       const items = [
@@ -765,9 +782,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         ['Focus session', () => focusSession(sessionId)],
       ];
       if (session?.group) {
-        items.splice(1, 0, ['Remove from group', () => editGroup({
-          action: 'move', session: sessionId,
-        })]);
+        items.splice(1, 0, confirmItem('Remove from group',
+          `Remove this session from “${session.group.name}”?`,
+          () => editGroup({action: 'move', session: sessionId}), x, y));
       }
       if (session?.agent_state === 'awaiting_user')
         items.push(['Mark as read', () => markSessionRead(sessionId)]);
@@ -845,7 +862,8 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
       if (new Set(sessions.map(s => s.root_repo || '')).size === 1)
         items.push([`Add ${count} to group…`, () => pickGroup(sessions, x, y)]);
       if (sessions.some(s => s.group))
-        items.push(['Remove from group', () => editGroup({action: 'move', sessions: ids})]);
+        items.push(confirmItem('Remove from group', `Remove ${count} from their groups?`,
+          () => editGroup({action: 'move', sessions: ids}), x, y));
       if (!closingGroup) {
         items.push([`Close ${count}…`, () => openMenu([
           ['Cancel', () => {}],
@@ -873,7 +891,9 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           [name, () => editGroup({action: 'recolor', group: id, color})]), x, y)],
       ];
       addReorderActions(items, itemsInOrder.map(([key]) => key), `group:${id}`, {group: id});
-      items.push(['Ungroup sessions', () => editGroup({action: 'ungroup', group: id})]);
+      items.push(confirmItem('Ungroup sessions',
+        `Dissolve “${group.name}”? Its sessions stay open.`,
+        () => editGroup({action: 'ungroup', group: id}), x, y));
       if (!closingGroup) {
         items.push(['Close group…', () => {
           const sessions = itemsInOrder[index][1].map(s => s.id);
@@ -1119,6 +1139,11 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
           hint.textContent = 'Click here to enable the blue focus marker';
           connectEvents();
         }
+        for (const s of sessions) {
+          if (lastStates.get(s.id) === 'running' && s.agent_state === 'awaiting_user')
+            finishedAt.set(s.id, Date.now());
+          lastStates.set(s.id, s.agent_state);
+        }
         allSessions = sessions;
         for (const id of selectedSessions) {
           if (!sessions.some(row => row.id === id)) selectedSessions.delete(id);
@@ -1338,8 +1363,10 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
              ${labelChip}
            </div>`
         : '';
-      return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}${selectedSessions.has(s.id) ? ' selected' : ''}"
-                   data-session="${s.id}" draggable="true">
+      const flashAge = Date.now() - (finishedAt.get(s.id) ?? -Infinity);
+      const flashing = flashAge < FLASH_MS;
+      return `<div class="agent ${meta.cls}${s.focused ? ' current' : ''}${selectedSessions.has(s.id) ? ' selected' : ''}${flashing ? ' just-done' : ''}"
+                   data-session="${s.id}" draggable="true"${flashing ? ` style="--flash-delay:-${flashAge}ms"` : ''}>
         <div class="agent-top">
           <span class="status">${meta.icon} ${meta.label}</span>
           ${typeBadge}
@@ -1360,7 +1387,7 @@ AGENT_MONITOR_HTML = """<!DOCTYPE html>
         case 'running':
           return { cls: 'running', icon: '&#9679;', label: 'running' };
         case 'awaiting_user':
-          return { cls: 'awaiting-user', icon: '&#9670;', label: 'done' };
+          return { cls: 'awaiting-user', icon: '&#10003;', label: 'done' };
         case 'idle':
           return { cls: 'idle', icon: '&#9675;', label: 'idle' };
         default:

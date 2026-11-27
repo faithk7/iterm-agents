@@ -306,6 +306,17 @@ async function settle() {for (let i = 0; i < 40; i++) await Promise.resolve();}
   await vm.runInContext('loadSessions(true)', stalled.context);
   assert.equal(vm.runInContext('allSessions[0].id', stalled.context), 'recovered');
   assert.equal(vm.runInContext("document.getElementById('connection-status').hidden", stalled.context), true);
+  // A running→done flip flashes once; a session first seen as done does not.
+  const flashHtml = async state => {
+    stalled.context.fetch = async () => ({json: async () => [
+      {id: 'flash', name: 'flash', agent_state: state, awaiting_user: state === 'awaiting_user', window_id: 'w1'},
+    ]});
+    await vm.runInContext('loadSessions(true)', stalled.context);
+    return vm.runInContext("document.getElementById('sessions').innerHTML", stalled.context);
+  };
+  assert.ok(!(await flashHtml('awaiting_user')).includes('just-done'));
+  await flashHtml('running');
+  assert.ok((await flashHtml('awaiting_user')).includes('just-done'));
 })().catch(error => {console.error(error); process.exitCode = 1;});
 """],
         input=json.dumps(script), text=True, capture_output=True, timeout=10,

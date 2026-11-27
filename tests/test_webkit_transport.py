@@ -192,6 +192,7 @@ async function waitFor(condition, message) {
     'drop group before a loose card');
   await waitFor(() => groupOf(2).nextElementSibling === card(1), 'drag reorders against loose card');
   groupMenu(groupOf(2));
+  choose('Ungroup sessions…');
   choose('Ungroup sessions');
   await waitFor(() => card(2) && !groupOf(2), 'ungroup placement test session');
 
@@ -289,9 +290,11 @@ async function waitFor(condition, message) {
     'group membership is shared by fresh panels');
 
   rightClick(card(1));
+  choose('Remove from group…');
   choose('Remove from group');
   await waitFor(() => card(1) && !groupOf(1), 'remove member');
   groupMenu(groupOf(3));
+  choose('Ungroup sessions…');
   choose('Ungroup sessions');
   await waitFor(() => card(3) && !groupOf(3), 'ungroup all members');
 
